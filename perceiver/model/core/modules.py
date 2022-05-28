@@ -55,9 +55,9 @@ class MultiHeadAttention(nn.Module):
         self.dp_scale = num_qk_channels_per_head ** -0.5
         self.num_heads = num_heads
 
-        self.q_proj = nn.Linear(num_q_input_channels, num_qk_channels, bias=False)
-        self.k_proj = nn.Linear(num_kv_input_channels, num_qk_channels, bias=False)
-        self.v_proj = nn.Linear(num_kv_input_channels, num_v_channels, bias=False)
+        self.q_proj = nn.Linear(num_q_input_channels, num_qk_channels)
+        self.k_proj = nn.Linear(num_kv_input_channels, num_qk_channels)
+        self.v_proj = nn.Linear(num_kv_input_channels, num_v_channels)
         self.o_proj = nn.Linear(num_v_channels, num_output_channels)
         self.dropout = nn.Dropout(dropout)
 
