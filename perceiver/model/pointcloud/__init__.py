@@ -1,0 +1,1 @@
+from perceiver.model.pointcloud.classifier import PointCloudEncoderConfig, PointCloudInputAdapter
