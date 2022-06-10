@@ -2,16 +2,16 @@ import argparse
 
 
 # common settings for pretraining CrossPoint
-parser = argparse.ArgumentParser(description='CrossPoint for Point Cloud Understanding')
+parser = argparse.ArgumentParser(description='General Attention for Point Cloud Understanding')
 
-parser.add_argument('--proj_name', type=str, default='PointMAE', metavar='N',
+parser.add_argument('--proj_name', type=str, default='Perceiver', metavar='N',
                     help='Name of the project')
 parser.add_argument('--exp_name', type=str, default='try', metavar='N',
                     help='Name of the experiment')
 
 parser.add_argument('--main_program', type=str, default='main.py', metavar='N',
                     help='Name of main program')
-parser.add_argument('--model_name', type=str, default='model.py', metavar='N',
+parser.add_argument('--model_name', type=str, default='modules.py', metavar='N',
                     help='Name of model file')
 
 parser.add_argument('--seed', type=int, default=1, metavar='S',
@@ -46,7 +46,7 @@ parser.add_argument('--scheduler', type=str, default='cos', metavar='N',
 
 parser.add_argument('--num_pt_points', type=int, default=2048,
                     help='Number of points when pretraining')
-parser.add_argument('--num_test_points', type=int, default=2048,
+parser.add_argument('--num_test_points', type=int, default=1024,
                     help='Number of points when svm test')
 
 # --------- Model specifics
@@ -57,17 +57,17 @@ parser.add_argument('--group_size', type=int, default=32,
 
 parser.add_argument('--num_pc_latents', type=int, default=128,
                     help='array length of latent point cloud')
-parser.add_argument('--num_img_latents', type=int, default=256,
+parser.add_argument('--num_img_latents', type=int, default=128,
                     help='array length of latent image')
 parser.add_argument('--num_latent_channels', type=int, default=256,
-                    help='array length of latent image')
-parser.add_argument('--num_sa_heads', type=int, default=8,
-                    help='number of heads in self attention')
+                    help='channels of element in latent array')
 
 parser.add_argument('--num_ca_layers', type=int, default=1, metavar='N', help='Number of cross attention layers')
-parser.add_argument('--num_ca_heads', type=int, default=1, metavar='N', help='Number of heads in cross attention layer')
-parser.add_argument('--num_sa_layers_per_block', type=int, default=6, metavar='N', help='Number of layers in each block')
+parser.add_argument('--num_ca_heads', type=int, default=4, metavar='N', help='Number of heads in cross attention layer')
+parser.add_argument('--num_sa_layers_`per_block', type=int, default=6, metavar='N', help='Number of layers in each block')
 parser.add_argument('--num_sa_blocks', type=int, default=1, metavar='N', help='Number of self attention blocks')
+parser.add_argument('--num_sa_heads', type=int, default=4,
+                    help='number of heads in self attention')
 
 parser.add_argument('--mlp_widen_factor', type=int, default=2, metavar='N',
                     help='dimension factor of hidden layer in MLP')
@@ -78,12 +78,11 @@ parser.add_argument('--atten_drop', type=float, default=0.1,
 parser.add_argument('--mlp_drop', type=float, default=0.5,
                     help='dropout rate in MLP')
 
-parser.add_argument('--posFlag', action="store_false", 
-                    help='whether integrate pos tokens into the input sequence')
-parser.add_argument('--clsFlag', action="store_false", 
-                    help='whether integrate the cls token into the input sequence')
 parser.add_argument('--cmid_weight', type=float, default=2.0,
                     help='weight of loss_cmid')
+
+parser.add_argument('--img_height', type=int, default=224, help='input image height')
+parser.add_argument('--img_width', type=int, default=224, help='input image width')
 # ---------
 
 parser.add_argument('--save_freq', type=int, default=50, help='save frequency')
@@ -114,7 +113,7 @@ parser.add_argument('--class_choice', type=str, default=None, metavar='N',
                                 'motor', 'mug', 'pistol', 'rocket', 'skateboard', 'table'])
 
 # wandb settings
-parser.add_argument('--wb_url', type=str, default=None, help='wandb server url')
-parser.add_argument('--wb_key', type=str, default=None, help='wandb login key')
+parser.add_argument('--wb_url', type=str, default="http://202.112.113.239:28282", help='wandb server url')
+parser.add_argument('--wb_key', type=str, default="local-66548ed1d838753aa6c72555da8c798d184591b0", help='wandb login key')
 
 args = parser.parse_args()
