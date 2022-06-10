@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from fairscale.nn import checkpoint_wrapper
-from torch import Tensor
+from torch import Tensor, dropout
 
 from perceiver.model.core.utils import Sequential
 
@@ -88,6 +88,7 @@ class MultiHeadAttention(nn.Module):
             attn.masked_fill_(pad_mask, attn_max_neg)
 
         attn = attn.softmax(dim=-1)
+        # 这里 q,k 做完attention，还要做dropout，想想自己之前是否忽略了这一点
         attn = self.dropout(attn)
 
         o = torch.einsum("b i j, b j c -> b i c", attn, v)
@@ -176,8 +177,10 @@ class CrossAttentionLayer(Sequential):
         )
         super().__init__(
             Residual(cross_attn, dropout) if attention_residual else cross_attn,
-            Residual(MLP(num_q_input_channels, widening_factor), dropout),
+            Residual(MLP(num_q_input_channels, widening_factor), dropout=0.5),
         )
+    # The forward() method of Sequential accepts any input and forwards it to the first module it contains. 
+    # It then “chains” outputs to inputs sequentially for each subsequent module, finally returning the output of the last module.
 
 
 class SelfAttentionLayer(Sequential):
@@ -199,7 +202,7 @@ class SelfAttentionLayer(Sequential):
         )
         super().__init__(
             Residual(self_attn, dropout),
-            Residual(MLP(num_channels, widening_factor), dropout),
+            Residual(MLP(num_channels, widening_factor), dropout=0.5),
         )
 
 
@@ -251,7 +254,9 @@ class Residual(nn.Module):
         self.dropout_p = dropout
 
     def forward(self, *args, **kwargs):
+        # x 是 SelfAttentionLayer 的输出
         x = self.module(*args, **kwargs)
+        # 对 x 做dropout，再做残差连接
         return self.dropout(x) + args[0]
 
 
@@ -285,6 +290,7 @@ class OutputAdapter(nn.Module):
 
     def _init_parameters(self):
         with torch.no_grad():
+            # 把数值范围限定在 (-2.0, 2.0)
             self._output_query.normal_(0.0, 0.02).clamp_(-2.0, 2.0)
 
     @property
@@ -389,6 +395,7 @@ class PerceiverEncoder(nn.Module):
                 num_kv_input_channels=input_adapter.num_input_channels,
                 num_qk_channels=num_cross_attention_qk_channels,
                 num_v_channels=num_cross_attention_v_channels,
+                # 理解了这个 widening_factor 的含义，就是设定Attention Layer 中MLP隐层单元，是输入channel的多少倍
                 widening_factor=cross_attention_widening_factor,
                 dropout=dropout,
             )
@@ -421,6 +428,9 @@ class PerceiverEncoder(nn.Module):
 
         # learnable initial latent vectors
         self.latent = nn.Parameter(torch.empty(num_latents, num_latent_channels))
+        self.latent_head = nn.Sequential(
+            nn.BatchNorm1d(num_latent_channels),
+            nn.Linear(num_latent_channels, num_latent_channels, bias = False))
         self._init_parameters()
 
     def _init_parameters(self):
@@ -444,7 +454,9 @@ class PerceiverEncoder(nn.Module):
                 x_latent = self.cross_attn_n(x_latent, x, pad_mask)
             x_latent = self.self_attn_n(x_latent)
 
-        return x_latent
+        x_latent_feats = self.latent_head(x_latent.max(1)[0])
+
+        return x_latent_feats
 
 
 class PerceiverDecoder(nn.Module):
