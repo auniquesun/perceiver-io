@@ -1,42 +1,79 @@
 import torch
 
-from perceiver.model.core import PerceiverEncoder
+from perceiver.model.core import PerceiverEncoder, PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 
 from perceiver.model.image import ImageInputAdapter
 
 from perceiver.model.pointcloud import PointCloudInputAdapter
 
+from fvcore.nn import FlopCountAnalysis
 
-# # ------ Image
-# # Fourier-encodes pixel positions and flatten along spatial dimensions
+
+# ------ Image
+# Fourier-encodes pixel positions and flatten along spatial dimensions
 # input_adapter = ImageInputAdapter(
-#   image_shape=(224, 224, 3),  # M = 224 * 224
+#   image_shape=(137, 137, 3),  # M = 137 * 137
 #   num_frequency_bands=64,
 # )
 
 # # Generic Perceiver encoder
 # encoder = PerceiverEncoder(
 #   input_adapter=input_adapter,
-#   num_latents=512,  # N
+#   num_latents=128,  # N
 #   num_latent_channels=256,  # D
-#   num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
-#   num_cross_attention_heads=1,
-#   num_self_attention_heads=8,
+#   num_cross_attention_qk_channels=256,  # C
+#   num_cross_attention_heads=4,
+#   num_self_attention_heads=4,
 #   num_self_attention_layers_per_block=6,
-#   num_self_attention_blocks=8,
-#   dropout=0.0,
+#   num_self_attention_blocks=1,
+#   dropout=0.1,
 # )
 
-# input = torch.randn(2, 224, 224, 3)
-# output: [2, 512, 512]
-# output = encoder(input)
-# print(output.shape)
+# pytorch_total_params = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+# print('total parameters:', pytorch_total_params)
 
+# input = torch.randn(1, 137, 137, 3)
+# output = encoder(input)
+# print('output.shape:', output.shape)
+
+# flops = FlopCountAnalysis(encoder, input)
+# print('total flops:', flops.total())
+
+# ------ PointCloud
+input_adapter_pc = PointCloudInputAdapter(
+  pointcloud_shape=(2048, 3),
+  num_input_channels=256,
+  num_groups=128,
+  group_size=32
+)
+
+encoder_pc = PerceiverEncoder(
+  input_adapter=input_adapter_pc,
+  num_latents=128,  # N
+  num_latent_channels=256,  # D
+  num_cross_attention_qk_channels=input_adapter_pc.num_input_channels,  # C
+  num_cross_attention_heads=1,
+  num_self_attention_heads=4,
+  num_self_attention_layers_per_block=6,
+  num_self_attention_blocks=1,
+  dropout=0.0,
+)
+
+input_pc = torch.randn(1, 2048, 3)
+output_pc = encoder_pc(input_pc)
+print(output_pc.shape)
+
+pytorch_total_params = sum(p.numel() for p in encoder_pc.parameters() if p.requires_grad)
+print('total parameters:', pytorch_total_params)
+
+flops = FlopCountAnalysis(encoder_pc, input_pc)
+print('total flops:', flops.total())
+
+# ------ 经过测试，数据加载没问题，问题出在其他地方
 # from torch.utils.data import DataLoader
 # from datasets.data import ShapeNetRender
 # from utils import transform
 
-# ------ test PointCloud dataloader
 # train_set = ShapeNetRender(transform)
 # train_loader = DataLoader(
 #         train_set,
@@ -57,30 +94,53 @@ from perceiver.model.pointcloud import PointCloudInputAdapter
 #     print('imgs.shape:', imgs.shape)
 #     break
 
-# ------ PointCloud
-input_adapter_pc = PointCloudInputAdapter(
-  pointcloud_shape=(2048, 3),
-  num_input_channels=256,
-  num_groups=128,
-  group_size=32
-)
 
-encoder_pc = PerceiverEncoder(
-  input_adapter=input_adapter_pc,
-  num_latents=128,  # N
-  num_latent_channels=256,  # D
-  num_cross_attention_qk_channels=input_adapter_pc.num_input_channels,  # C
-  num_cross_attention_heads=1,
-  num_self_attention_heads=8,
-  num_self_attention_layers_per_block=6,
-  num_self_attention_blocks=8,
-  dropout=0.0,
-)
+# input_adapter = PointCloudInputAdapter(
+#     pointcloud_shape=(2048, 3),
+#     num_input_channels=256,
+#     num_groups=128,
+#     group_size=32)
 
-input_pc = torch.randn(2, 2048, 3)
-# output_pc: [2, 128, 512]
-output_pc = encoder_pc(input_pc)
-print(output_pc.shape)
+# encoder = PerceiverEncoder(
+#     input_adapter=input_adapter,
+#     num_latents=128,  # N
+#     num_latent_channels=256,  # D
+#     num_cross_attention_heads=4,
+#     num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
+#     num_cross_attention_v_channels=None,
+#     num_cross_attention_layers=1,
+#     first_cross_attention_layer_shared=False,
+#     cross_attention_widening_factor=2,
+#     num_self_attention_heads=4,
+#     num_self_attention_qk_channels=None,
+#     num_self_attention_v_channels=None,
+#     num_self_attention_layers_per_block=6,
+#     num_self_attention_blocks=1,
+#     first_self_attention_block_shared=True,
+#     self_attention_widening_factor=2,
+#     dropout=0.1)
 
-pytorch_total_params = sum(p.numel() for p in encoder_pc.parameters() if p.requires_grad)
-print('total parameters:', pytorch_total_params)
+# output_adapter = ClassificationOutputAdapter(
+#     num_classes=40,
+#     num_output_queries=1,
+#     num_output_query_channels=256)
+# decoder = PerceiverDecoder(
+#     output_adapter=output_adapter,
+#     num_latent_channels=256,  # D
+#     num_cross_attention_heads=4,
+#     num_cross_attention_qk_channels=256,
+#     num_cross_attention_v_channels=None,
+#     cross_attention_widening_factor=2,
+#     dropout=0.1)
+
+# model = PerceiverIO(encoder, decoder)
+
+# pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+# print('total parameters:', pytorch_total_params)
+
+# input = torch.randn(1,2048,3)
+# output = model(input)
+# print('output.shape:', output.shape)
+
+# flops = FlopCountAnalysis(model, input)
+# print('fvcore - total flops:', flops.total())

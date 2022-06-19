@@ -179,6 +179,7 @@ class CrossAttentionLayer(Sequential):
             Residual(cross_attn, dropout) if attention_residual else cross_attn,
             Residual(MLP(num_q_input_channels, widening_factor), dropout=0.5),
         )
+    # 这里前向传播函数应该是省掉了，因为继承了 Sequential
     # The forward() method of Sequential accepts any input and forwards it to the first module it contains. 
     # It then “chains” outputs to inputs sequentially for each subsequent module, finally returning the output of the last module.
 
@@ -244,6 +245,7 @@ class MLP(Sequential):
             nn.GELU(),
             nn.Linear(widening_factor * num_channels, num_channels),
         )
+        # dropout 没有显式加在这里，而是加在了 Residual
 
 
 class Residual(nn.Module):
@@ -428,14 +430,39 @@ class PerceiverEncoder(nn.Module):
 
         # learnable initial latent vectors
         self.latent = nn.Parameter(torch.empty(num_latents, num_latent_channels))
-        self.latent_head = nn.Sequential(
-            nn.BatchNorm1d(num_latent_channels),
-            nn.Linear(num_latent_channels, num_latent_channels, bias = False))
         self._init_parameters()
 
     def _init_parameters(self):
         with torch.no_grad():
             self.latent.normal_(0.0, 0.02).clamp_(-2.0, 2.0)
+
+    def forward(self, x, pad_mask=None):
+        b, *_ = x.shape
+
+        # encode task-specific input
+        x = self.input_adapter(x)
+
+        # repeat initial latent vector along batch dimension
+        x_latent = repeat(self.latent, "... -> b ...", b=b)
+
+        x_latent = self.cross_attn_1(x_latent, x, pad_mask)
+        x_latent = self.self_attn_1(x_latent)
+
+        for i in range(1, self.num_self_attention_blocks):
+            if i < self.num_cross_attention_layers:
+                x_latent = self.cross_attn_n(x_latent, x, pad_mask)
+            x_latent = self.self_attn_n(x_latent)
+
+        return x_latent
+
+
+class PerceiverEncoder_feats_head(PerceiverEncoder):
+    def __init__(self, input_adapter: InputAdapter, num_latents: int, num_latent_channels: int, num_cross_attention_heads: int = 4, num_cross_attention_qk_channels: Optional[int] = None, num_cross_attention_v_channels: Optional[int] = None, num_cross_attention_layers: int = 1, first_cross_attention_layer_shared: bool = False, cross_attention_widening_factor: int = 1, num_self_attention_heads: int = 4, num_self_attention_qk_channels: Optional[int] = None, num_self_attention_v_channels: Optional[int] = None, num_self_attention_layers_per_block: int = 6, num_self_attention_blocks: int = 1, first_self_attention_block_shared: bool = True, self_attention_widening_factor: int = 1, dropout: float = 0, activation_checkpointing: bool = False):
+        super().__init__(input_adapter, num_latents, num_latent_channels, num_cross_attention_heads, num_cross_attention_qk_channels, num_cross_attention_v_channels, num_cross_attention_layers, first_cross_attention_layer_shared, cross_attention_widening_factor, num_self_attention_heads, num_self_attention_qk_channels, num_self_attention_v_channels, num_self_attention_layers_per_block, num_self_attention_blocks, first_self_attention_block_shared, self_attention_widening_factor, dropout, activation_checkpointing)
+
+        self.latent_head = nn.Sequential(
+            nn.BatchNorm1d(num_latent_channels),
+            nn.Linear(num_latent_channels, num_latent_channels, bias = False))
 
     def forward(self, x, pad_mask=None):
         b, *_ = x.shape
@@ -505,12 +532,23 @@ class PerceiverDecoder(nn.Module):
         self.output_adapter = output_adapter
 
     def forward(self, x):
+        ''' decoder 前向传播，输入来自3部分
+                1. output query array
+                2. latent key array
+                3. latent value array
+            2和3其实从同一latent array而来
+        '''
+        # output_query: [batch_size, num_output_queries=1, num_output_query_channels]
         output_query = self.output_adapter.output_query(x)
+        # output: [batch_size, num_output_queries=1, num_output_query_channels]
         output = self.cross_attn(output_query, x)
+        # output: [batch_size, num_classes]
         return self.output_adapter(output)
 
 
 class PerceiverIO(Sequential):
+    ''' 父类是Sequential，前向传播就是按顺序
+    '''
     def __init__(self, encoder: PerceiverEncoder, decoder: PerceiverDecoder):
         super().__init__(encoder, decoder)
 

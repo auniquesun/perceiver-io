@@ -6,14 +6,15 @@ import wandb
 import torch
 from parser import args
 
-from perceiver.model.core import PerceiverEncoder
+from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head, \
+        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
 from perceiver.model.pointcloud import PointCloudInputAdapter
 
 import torchvision.transforms as transforms
 
 
-transform = transforms.Compose([transforms.Resize((224, 224)),
+transform = transforms.Compose([transforms.Resize((args.img_height, args.img_width)),
                                 transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
                                 transforms.RandomHorizontalFlip(),
                                 transforms.ToTensor(), 
@@ -78,6 +79,9 @@ class Logger(object):
 
 
 def build_model():
+    ''' construct a point cloud  and an image model, 
+            which will pretrain on a selected dataset
+    '''
     pc_input_adapter = PointCloudInputAdapter(
         pointcloud_shape=(args.num_pt_points, 3),
         num_input_channels=args.num_latent_channels,
@@ -85,7 +89,7 @@ def build_model():
         group_size=args.group_size)
 
     # Generic Perceiver encoder
-    pc_model = PerceiverEncoder(
+    pc_model = PerceiverEncoder_feats_head(
         input_adapter=pc_input_adapter,
         num_latents=args.num_pc_latents,  # N
         num_latent_channels=args.num_latent_channels,  # D
@@ -105,11 +109,11 @@ def build_model():
         dropout=args.atten_drop)
 
     img_input_adapter = ImageInputAdapter(
-        image_shape=(224, 224, 3),  # M = 224 * 224
+        image_shape=(args.img_height, args.img_width, 3),
         num_frequency_bands=64)
 
     # Generic Perceiver encoder
-    img_model = PerceiverEncoder(
+    img_model = PerceiverEncoder_feats_head(
         input_adapter=img_input_adapter,
         num_latents=args.num_img_latents,  # N
         num_latent_channels=args.num_latent_channels,  # D
@@ -126,9 +130,55 @@ def build_model():
         num_self_attention_blocks=args.num_sa_blocks,
         first_self_attention_block_shared=True,
         self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop)    
+        dropout=args.atten_drop)
 
     return pc_model, img_model
+
+
+def build_finetune_model(rank=None):
+    ''' construct a point cloud model, which will finetune on downstream datasets
+    '''
+    input_adapter = PointCloudInputAdapter(
+        pointcloud_shape=(args.num_pt_points, 3),
+        num_input_channels=args.num_latent_channels,
+        num_groups=args.num_groups,
+        group_size=args.group_size)
+
+    encoder = PerceiverEncoder(
+        input_adapter=input_adapter,
+        num_latents=args.num_pc_latents,  # N
+        num_latent_channels=args.num_latent_channels,  # D
+        num_cross_attention_heads=args.num_ca_heads,
+        num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
+        num_cross_attention_v_channels=None,
+        num_cross_attention_layers=args.num_ca_layers,
+        first_cross_attention_layer_shared=False,
+        cross_attention_widening_factor=args.mlp_widen_factor,
+        num_self_attention_heads=args.num_sa_heads,
+        num_self_attention_qk_channels=None,
+        num_self_attention_v_channels=None,
+        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
+        num_self_attention_blocks=args.num_sa_blocks,
+        first_self_attention_block_shared=True,
+        self_attention_widening_factor=args.mlp_widen_factor,
+        dropout=args.atten_drop).to(rank)
+
+    output_adapter = ClassificationOutputAdapter(
+        num_classes=args.num_classes,
+        num_output_queries=args.output_seq_length,
+        num_output_query_channels=args.num_latent_channels)
+    decoder = PerceiverDecoder(
+        output_adapter=output_adapter,
+        num_latent_channels=args.num_latent_channels,  # D
+        num_cross_attention_heads=args.num_ca_heads,
+        num_cross_attention_qk_channels=args.num_latent_channels,
+        num_cross_attention_v_channels=None,
+        cross_attention_widening_factor=args.mlp_widen_factor,
+        dropout=args.atten_drop).to(rank)
+
+    model = PerceiverIO(encoder, decoder).to(rank)
+
+    return model
 
 
 def init(exp_name, main_program, model_name):

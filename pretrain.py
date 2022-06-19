@@ -17,7 +17,8 @@ from utils import build_model, transform
 from sklearn.svm import SVC
 
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, StepLR, ReduceLROnPlateau
+from cosine_annealing_warmup import CosineAnnealingWarmupRestarts
 
 from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler
@@ -60,10 +61,17 @@ def main(rank, logger_name, log_path, log_file):
         sampler=train_sampler,
         batch_size=samples_per_gpu,
         shuffle=False,
-        num_workers=0,
+        num_workers=args.world_size,
         pin_memory=True,
-        drop_last=False
-    )
+        drop_last=False)
+    train_val_loader = DataLoader(
+        ModelNet40SVM(partition='train', num_points=args.num_test_points), 
+        batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.world_size, pin_memory=True, drop_last=False)
+    test_val_loader = DataLoader(
+        ModelNet40SVM(partition='test', num_points=args.num_test_points), 
+        batch_size=args.test_batch_size, shuffle=True,
+        num_workers=args.world_size, pin_memory=True, drop_last=False)
 
     pc_model, img_model = build_model()
     pc_model, img_model = pc_model.to(rank), img_model.to(rank)
@@ -103,14 +111,27 @@ def main(rank, logger_name, log_path, log_file):
         lr_scheduler = CosineAnnealingLR(
             optimizer, 
             T_max=args.epochs)
+    elif args.scheduler == 'coswarm':
+        # lr_scheduler = CosineAnnealingWarmRestarts(
+        #     optimizer, 
+        #     T_0=args.warm_epochs)
+        lr_scheduler = CosineAnnealingWarmupRestarts(
+            optimizer,
+            first_cycle_steps=args.step_size,
+            max_lr=args.max_lr,
+            min_lr=args.min_lr,
+            warmup_steps=args.warm_epochs,
+            gamma=args.gamma)
+    elif args.scheduler == 'plateau':
+        lr_scheduler = ReduceLROnPlateau(
+            optimizer, 
+            mode='min',
+            factor=args.factor,
+            patience=args.patience)
     elif args.scheduler == 'step':
         lr_scheduler = StepLR(
             optimizer, 
-            step_size=len(train_loader)//samples_per_gpu,
-            verbose=True)
-
-    if rank == 0:
-        wandb.watch(pc_model_ddp, log_freq=20)
+            step_size=args.step_size)
 
     scaler = GradScaler()
     criterion = NTXentLoss(temperature = 0.1).to(rank)
@@ -127,7 +148,7 @@ def main(rank, logger_name, log_path, log_file):
         train_loss = AverageMeter()
 
         for i, ((pc_t1, pc_t2), imgs) in enumerate(train_loader):
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             with autocast():
                 pc_t1, pc_t2, imgs = pc_t1.to(rank), pc_t2.to(rank), imgs.to(rank)
@@ -174,93 +195,91 @@ def main(rank, logger_name, log_path, log_file):
         # overall_train_loss = np.mean(tmp)
 
         # ------ Test
-        pc_model_ddp.eval()
-        img_model_ddp.eval()
+        with torch.no_grad():   # it will disable gradients computation and save memory
+            pc_model_ddp.eval()
+            img_model_ddp.eval()
 
-        train_val_loader = DataLoader(
-            ModelNet40SVM(partition='train', num_points=args.num_test_points), 
-            batch_size=args.test_batch_size, shuffle=True)
-        train_feats = []
-        train_labels = []
+            train_feats = []
+            train_labels = []
 
-        for i, (data, label) in enumerate(train_val_loader):
-            labels = list(map(lambda x: x[0], label.numpy().tolist()))
-            data = data.to(rank)
-            with torch.no_grad():
-                feats = pc_model_ddp(data)
-            feats = feats.detach().cpu().numpy()
-            train_feats.extend(feats)
-            train_labels.extend(labels)
+            for i, (data, label) in enumerate(train_val_loader):
+                labels = list(map(lambda x: x[0], label.numpy().tolist()))
+                data = data.to(rank)
+                with torch.no_grad():
+                    feats = pc_model_ddp(data)
+                feats = feats.detach().cpu().numpy()
+                train_feats.extend(feats)
+                train_labels.extend(labels)
 
-        train_feats = np.array(train_feats)
-        train_labels = np.array(train_labels)
+            train_feats = np.array(train_feats)
+            train_labels = np.array(train_labels)
 
-        # ------ LinearSVC vs. SVC
-        # The strength of regularization is inversely to C. Must be strictly positive.
-        # svm = LinearSVC(penalty='l2', loss='squared_hinge', dual=False, C=0.1, random_state=args.seed, max_iter=1000)
-        svm = SVC(C=0.1, kernel='linear')
+            # ------ LinearSVC vs. SVC
+            # The strength of regularization is inversely to C. Must be strictly positive.
+            # svm = LinearSVC(penalty='l2', loss='squared_hinge', dual=False, C=0.1, random_state=args.seed, max_iter=1000)
+            svm = SVC(C=0.1, kernel='linear')
 
-        logger.write('Training SVM ...', rank=rank)
-        svm.fit(train_feats, train_labels)
-        
-        test_val_loader = DataLoader(
-            ModelNet40SVM(partition='test', num_points=args.num_test_points), 
-            batch_size=args.test_batch_size, shuffle=True)
-        test_feats = []
-        test_labels = []
+            logger.write('Training SVM ...', rank=rank)
+            svm.fit(train_feats, train_labels)
+            
+            test_feats = []
+            test_labels = []
 
-        for i, (data, label) in enumerate(test_val_loader):
-            labels = list(map(lambda x: x[0], label.numpy().tolist()))
-            data = data.to(rank)
-            with torch.no_grad():
-                feats = pc_model_ddp(data)
-            feats = feats.detach().cpu().numpy()
-            test_feats.extend(feats)
-            test_labels.extend(labels)
+            for i, (data, label) in enumerate(test_val_loader):
+                labels = list(map(lambda x: x[0], label.numpy().tolist()))
+                data = data.to(rank)
+                with torch.no_grad():
+                    feats = pc_model_ddp(data)
+                feats = feats.detach().cpu().numpy()
+                test_feats.extend(feats)
+                test_labels.extend(labels)
 
-        test_feats = np.array(test_feats)
-        test_labels = np.array(test_labels)
+            test_feats = np.array(test_feats)
+            test_labels = np.array(test_labels)
 
-        logger.write('Testing SVM ...', rank=rank)
-        test_accuracy = svm.score(test_feats, test_labels)
+            logger.write('Testing SVM ...', rank=rank)
+            test_accuracy = svm.score(test_feats, test_labels)
 
-        # tmp = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(tmp, test_accuracy)
-        # overall_test_acc = np.mean(tmp)
-        overall_test_acc = test_accuracy
+            # tmp = [.0 for _ in range(args.world_size)]
+            # dist.all_gather_object(tmp, test_accuracy)
+            # overall_test_acc = np.mean(tmp)
+            overall_test_acc = test_accuracy
 
-        if rank == 0:
-            logger.write(f'Test Accuracy of SVM: {overall_test_acc}', rank=rank)
+            if rank == 0:
+                logger.write(f'Test Accuracy of SVM: {overall_test_acc}', rank=rank)
 
-            if overall_test_acc > best_test_acc:
-                best_test_acc = overall_test_acc
-                logger.write(f'Finding new highest test score: {best_test_acc} !', rank=rank)
-                logger.write('Saving best model ...', rank=rank)
-                save_path = os.path.join('runs', args.exp_name, 'models', 'pc_model_best.pth')
-                torch.save(pc_model_ddp.module.state_dict(), save_path)
-                save_path = os.path.join('runs', args.exp_name, 'models', 'img_model_best.pth')
-                torch.save(img_model_ddp.module.state_dict(), save_path)
+                if overall_test_acc > best_test_acc:
+                    best_test_acc = overall_test_acc
+                    logger.write(f'Finding new highest test score: {best_test_acc} !', rank=rank)
+                    logger.write('Saving best model ...', rank=rank)
+                    save_path = os.path.join('runs', args.exp_name, 'models', 'pc_model_best.pth')
+                    torch.save(pc_model_ddp.module.state_dict(), save_path)
+                    save_path = os.path.join('runs', args.exp_name, 'models', 'img_model_best.pth')
+                    torch.save(img_model_ddp.module.state_dict(), save_path)
 
-            if epoch % args.save_freq == 0:
-                logger.write(f'Saving {epoch}th model ...', rank=rank)
-                save_path = os.path.join('runs', args.exp_name, 'models', f'pc_model_epoch{epoch}.pth')
-                torch.save(pc_model_ddp.module.state_dict(), save_path)
-                save_path = os.path.join('runs', args.exp_name, 'models', f'img_model_epoch{epoch}.pth')
-                torch.save(img_model_ddp.module.state_dict(), save_path)
+                if epoch % args.save_freq == 0:
+                    logger.write(f'Saving {epoch}th model ...', rank=rank)
+                    save_path = os.path.join('runs', args.exp_name, 'models', f'pc_model_epoch{epoch}.pth')
+                    torch.save(pc_model_ddp.module.state_dict(), save_path)
+                    save_path = os.path.join('runs', args.exp_name, 'models', f'img_model_epoch{epoch}.pth')
+                    torch.save(img_model_ddp.module.state_dict(), save_path)
 
-            wandb_log = dict()
-            # NOTE get_lr() vs. get_last_lr(), which should be used? The answer is get_last_lr()
-            # https://discuss.pytorch.org/t/whats-the-difference-between-get-lr-and-get-last-lr/121681
-            wandb_log['learning_rate'] = lr_scheduler.get_last_lr()[0]
-            wandb_log['Pretrain Loss'] = train_loss.avg
-            wandb_log['Pretrain IMID Loss'] = train_imid_loss.avg
-            wandb_log['Pretrain CMID Loss'] = train_cmid_loss.avg
-            wandb_log['svm_test_acc'] = overall_test_acc
-            wandb_log['svm_best_acc'] = best_test_acc
-            wandb.log(wandb_log)
+                wandb_log = dict()
+                # NOTE get_lr() vs. get_last_lr(), which should be used? The answer is get_last_lr()
+                # https://discuss.pytorch.org/t/whats-the-difference-between-get-lr-and-get-last-lr/121681
+                if args.scheduler == 'coswarm':
+                    wandb_log['learning_rate'] = lr_scheduler.get_lr()[0]
+                else:
+                    wandb_log['learning_rate'] = lr_scheduler.get_last_lr()[0]
+                wandb_log['Pretrain Loss'] = train_loss.avg
+                wandb_log['Pretrain IMID Loss'] = train_imid_loss.avg
+                wandb_log['Pretrain CMID Loss'] = train_cmid_loss.avg
+                wandb_log['svm_test_acc'] = overall_test_acc
+                wandb_log['svm_best_acc'] = best_test_acc
+                wandb.log(wandb_log)
 
-        # adjust learning rate before a new epoch
-        lr_scheduler.step()
+            # adjust learning rate before a new epoch
+            lr_scheduler.step()
 
     if rank == 0:
         logger.write(f'Final highest test score: {best_test_acc} !', rank=rank)

@@ -38,14 +38,30 @@ parser.add_argument('--optim', type=str, default='sgd', metavar='N',
                     help='optimizer to choose')
 parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                     help='learning rate (default: 0.001, 0.1 if using sgd)')
+parser.add_argument('--max_lr', type=float, default=0.1, metavar='LR',
+                    help='maximum learning rate')
+parser.add_argument('--min_lr', type=float, default=0.0, metavar='LR',
+                    help='minimum learning rate')
+parser.add_argument('--warm_epochs', type=int, default=10,
+                    help='number of iterations for the first restart')
+parser.add_argument('--factor', type=float, default=0.1, 
+                    help='factor by which the learning rate will be reduced. new_lr = lr * factor')
+parser.add_argument('--patience', type=int, default=10,
+                    help='number of epochs with no improvement after which learning rate will be reduced')
+parser.add_argument('--step_size', type=int, default=30,
+                    help='adapt learning rate every step_size epochs during training')
+parser.add_argument('--gamma', type=float, default=0.1, 
+                    help='lr = lr * gamma, every step_size epochs')
 parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                     help='SGD momentum (default: 0.9)')
 parser.add_argument('--scheduler', type=str, default='cos', metavar='N',
-                    choices=['cos', 'step'],
-                    help='Scheduler to use, [cos, step]')
+                    choices=['cos', 'coswarm', 'plateau', 'step'],
+                    help='Scheduler to use, [cos, step, coswarm, plateau]')
 
 parser.add_argument('--num_pt_points', type=int, default=2048,
                     help='Number of points when pretraining')
+parser.add_argument('--num_ft_points', type=int, default=1024,
+                    help='Number of points when finetuning')
 parser.add_argument('--num_test_points', type=int, default=1024,
                     help='Number of points when svm test')
 
@@ -64,7 +80,7 @@ parser.add_argument('--num_latent_channels', type=int, default=256,
 
 parser.add_argument('--num_ca_layers', type=int, default=1, metavar='N', help='Number of cross attention layers')
 parser.add_argument('--num_ca_heads', type=int, default=4, metavar='N', help='Number of heads in cross attention layer')
-parser.add_argument('--num_sa_layers_`per_block', type=int, default=6, metavar='N', help='Number of layers in each block')
+parser.add_argument('--num_sa_layers_per_block', type=int, default=6, metavar='N', help='Number of layers in each block')
 parser.add_argument('--num_sa_blocks', type=int, default=1, metavar='N', help='Number of self attention blocks')
 parser.add_argument('--num_sa_heads', type=int, default=4,
                     help='number of heads in self attention')
@@ -105,6 +121,7 @@ parser.add_argument('--master_port', type=str, default='12355', help='port of ma
 # finetune specifics
 parser.add_argument('--ft_dataset', type=str, default='ModelNet40', help='finetune dataset')
 parser.add_argument('--num_classes', type=int, default=40, help='number of object classes')
+parser.add_argument('--output_seq_length', type=int, default=1, help='output sequence length')
 
 # downstream task: Segmentation settings
 parser.add_argument('--class_choice', type=str, default=None, metavar='N',
