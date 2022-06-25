@@ -2,8 +2,11 @@ import os
 import shutil
 import logging
 import wandb
+import numpy as np
 
 import torch
+import torch.nn.functional as F
+
 from parser import args
 
 from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head, \
@@ -143,7 +146,6 @@ def build_finetune_model(rank=None):
         num_input_channels=args.num_latent_channels,
         num_groups=args.num_groups,
         group_size=args.group_size)
-
     encoder = PerceiverEncoder(
         input_adapter=input_adapter,
         num_latents=args.num_pc_latents,  # N
@@ -181,20 +183,72 @@ def build_finetune_model(rank=None):
     return model
 
 
-def init(exp_name, main_program, model_name):
+def init(proj_name, exp_name, main_program, model_name):
     if not os.path.exists('runs'):
         os.makedirs('runs')
-    if not os.path.exists(os.path.join('runs', exp_name)):
-        os.makedirs(os.path.join('runs', exp_name))
-    if not os.path.exists(os.path.join('runs', exp_name, 'files')):
-        os.makedirs(os.path.join('runs', exp_name, 'files'))
-    if not os.path.exists(os.path.join('runs', exp_name, 'models')):
-        os.makedirs(os.path.join('runs', exp_name, 'models'))
+    if not os.path.exists(os.path.join('runs', proj_name)):
+        os.makedirs(os.path.join('runs', proj_name))
+    if not os.path.exists(os.path.join('runs', proj_name, exp_name)):
+        os.makedirs(os.path.join('runs', proj_name, exp_name))
+    if not os.path.exists(os.path.join('runs', proj_name, exp_name, 'files')):
+        os.makedirs(os.path.join('runs',proj_name,  exp_name, 'files'))
+    if not os.path.exists(os.path.join('runs', proj_name, exp_name, 'models')):
+        os.makedirs(os.path.join('runs', proj_name, exp_name, 'models'))
 
-    shutil.copy(main_program, os.path.join('runs', exp_name, 'files'))
-    shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', exp_name, 'files'))
-    shutil.copy('utils.py', os.path.join('runs', exp_name, 'files'))
+    shutil.copy(main_program, os.path.join('runs', proj_name, exp_name, 'files'))
+    shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
+    shutil.copy('utils.py', os.path.join('runs', proj_name, exp_name, 'files'))
     
     # Actually, wandb login once is enough
     os.environ["WANDB_BASE_URL"] = args.wb_url
     wandb.login(key=args.wb_key)
+
+    # to fix BlockingIOError: [Errno 11]
+    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
+
+def calculate_shape_IoU(pred_np, seg_np, label, class_choice, visual=False):
+    seg_num = [4, 2, 2, 4, 4, 3, 3, 2, 4, 2, 6, 2, 3, 3, 3, 3]
+    index_start = [0, 4, 6, 8, 12, 16, 19, 22, 24, 28, 30, 36, 38, 41, 44, 47]
+
+    if not visual:
+        label = label.squeeze()
+    shape_ious = []
+    for shape_idx in range(seg_np.shape[0]):
+        if not class_choice:
+            start_index = index_start[label[shape_idx]]
+            num = seg_num[label[shape_idx]]
+            parts = range(start_index, start_index + num)
+        else:
+            parts = range(seg_num[label[0]])
+        part_ious = []
+        for part in parts:
+            I = np.sum(np.logical_and(pred_np[shape_idx] == part, seg_np[shape_idx] == part))
+            U = np.sum(np.logical_or(pred_np[shape_idx] == part, seg_np[shape_idx] == part))
+            if U == 0:
+                iou = 1  # If the union of groundtruth and prediction points is empty, then count part IoU as 1
+            else:
+                iou = I / float(U)
+            part_ious.append(iou)
+        shape_ious.append(np.mean(part_ious))
+    return shape_ious
+
+
+def partseg_loss(pred, gold, smoothing=True):
+    ''' Calculate cross entropy loss, apply label smoothing if needed. '''
+
+    gold = gold.contiguous().view(-1)
+
+    if smoothing:
+        eps = 0.2
+        n_class = pred.size(1)
+
+        one_hot = torch.zeros_like(pred).scatter(1, gold.view(-1, 1), 1)
+        one_hot = one_hot * (1 - eps) + (1 - one_hot) * eps / (n_class - 1)
+        log_prb = F.log_softmax(pred, dim=1)
+
+        loss = -(one_hot * log_prb).sum(dim=1).mean()
+    else:
+        loss = F.cross_entropy(pred, gold, reduction='mean')
+
+    return loss

@@ -194,10 +194,10 @@ def main(rank, logger_name, log_path, log_file):
         # dist.all_gather_object(total, acc_meter.total)
         # total = np.sum(total)
 
+        # ------ Test
         with torch.no_grad():
             ft_train_acc = acc_meter.num_pos / acc_meter.total
 
-            # ------ Test
             logger.write('Start testing on the %s test set ...' % args.ft_dataset, rank=rank)
             
             ft_test_loss, ft_test_acc = test(test_loader, model_ddp, criterion, rank)
@@ -212,12 +212,12 @@ def main(rank, logger_name, log_path, log_file):
                     ft_test_best_acc = ft_test_acc
                     logger.write(f'Finding new highest test score: {ft_test_best_acc} !', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
-                    save_path = os.path.join('runs', args.exp_name, 'models', 'model_best.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'model_best.pth')
                     torch.save(model_ddp.module.state_dict(), save_path)
 
                 if epoch % args.save_freq == 0:
                     logger.write(f'Saving {epoch}th model ...', rank=rank)
-                    save_path = os.path.join('runs', args.exp_name, 'models', f'model_epoch{epoch}.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_epoch{epoch}.pth')
                     torch.save(model_ddp.module.state_dict(), save_path)
 
                 wandb_log = dict()
@@ -241,7 +241,7 @@ def main(rank, logger_name, log_path, log_file):
     if rank == 0:
         logger.write(f'Final highest finetuning score: {ft_test_best_acc} !', rank=rank)
         logger.write('Saving the last model ...', rank=rank)
-        save_path = os.path.join('runs', args.exp_name, 'models', f'model_last.pth')
+        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_last.pth')
         torch.save(model_ddp.module.state_dict(), save_path)
         logger.write('End of DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
         wandb.finish()
@@ -288,13 +288,13 @@ def test(test_loader, model_ddp, criterion, rank):
 
 
 if '__main__' == __name__:
-    init(args.exp_name, args.main_program, args.model_name)
+    init(args.proj_name, args.exp_name, args.main_program, args.model_name)
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     torch.manual_seed(args.seed)
     
     logger_name = args.proj_name
-    log_path = os.path.join('runs', args.exp_name)
+    log_path = os.path.join('runs', args.proj_name, args.exp_name)
     log_file = f'{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.log'
 
     logger = Logger(logger_name=logger_name, log_path=log_path, log_file=log_file)

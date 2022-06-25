@@ -64,23 +64,24 @@ def main(rank, logger_name, log_path, log_file):
         num_workers=args.world_size,
         pin_memory=True,
         drop_last=False)
+
+    # here set `num_workers=0` because ModelNet40 has much less samples than ShapeNet 
+    # thus smaller len(train_val_loader) and len(test_val_loader)
     train_val_loader = DataLoader(
         ModelNet40SVM(partition='train', num_points=args.num_test_points), 
-        batch_size=args.test_batch_size, shuffle=True,
-        num_workers=args.world_size, pin_memory=True, drop_last=False)
+        batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
     test_val_loader = DataLoader(
         ModelNet40SVM(partition='test', num_points=args.num_test_points), 
-        batch_size=args.test_batch_size, shuffle=True,
-        num_workers=args.world_size, pin_memory=True, drop_last=False)
+        batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
     pc_model, img_model = build_model()
     pc_model, img_model = pc_model.to(rank), img_model.to(rank)
 
     if args.resume:
-        path = os.path.join('runs', args.exp_name, 'models', args.pc_model_file)
+        path = os.path.join('runs', args.proj_name, args.exp_name, 'models', args.pc_model_file)
         pretrained = torch.load(path)
         pc_model.load_state_dict(pretrained)
-        path = os.path.join('runs', args.exp_name, 'models', args.img_model_file)
+        path = os.path.join('runs', args.proj_name, args.exp_name, 'models', args.img_model_file)
         pretrained = torch.load(path)
         img_model.load_state_dict(pretrained)
 
@@ -252,16 +253,16 @@ def main(rank, logger_name, log_path, log_file):
                     best_test_acc = overall_test_acc
                     logger.write(f'Finding new highest test score: {best_test_acc} !', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
-                    save_path = os.path.join('runs', args.exp_name, 'models', 'pc_model_best.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
                     torch.save(pc_model_ddp.module.state_dict(), save_path)
-                    save_path = os.path.join('runs', args.exp_name, 'models', 'img_model_best.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'img_model_best.pth')
                     torch.save(img_model_ddp.module.state_dict(), save_path)
 
                 if epoch % args.save_freq == 0:
                     logger.write(f'Saving {epoch}th model ...', rank=rank)
-                    save_path = os.path.join('runs', args.exp_name, 'models', f'pc_model_epoch{epoch}.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'pc_model_epoch{epoch}.pth')
                     torch.save(pc_model_ddp.module.state_dict(), save_path)
-                    save_path = os.path.join('runs', args.exp_name, 'models', f'img_model_epoch{epoch}.pth')
+                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'img_model_epoch{epoch}.pth')
                     torch.save(img_model_ddp.module.state_dict(), save_path)
 
                 wandb_log = dict()
@@ -284,9 +285,9 @@ def main(rank, logger_name, log_path, log_file):
     if rank == 0:
         logger.write(f'Final highest test score: {best_test_acc} !', rank=rank)
         logger.write(f'Saving the last model ...', rank=rank)
-        save_path = os.path.join('runs', args.exp_name, 'models', f'pc_model_last.pth')
+        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'pc_model_last.pth')
         torch.save(pc_model_ddp.module.state_dict(), save_path)
-        save_path = os.path.join('runs', args.exp_name, 'models', f'img_model_last.pth')
+        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'img_model_last.pth')
         torch.save(img_model_ddp.module.state_dict(), save_path)
         wandb.finish()
 
@@ -294,13 +295,13 @@ def main(rank, logger_name, log_path, log_file):
 
 
 if '__main__' == __name__:
-    init(args.exp_name, args.main_program, args.model_name)
+    init(args.proj_name, args.exp_name, args.main_program, args.model_name)
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
     torch.manual_seed(args.seed)
     
     logger_name = args.proj_name
-    log_path = os.path.join('runs', args.exp_name)
+    log_path = os.path.join('runs', args.proj_name, args.exp_name)
     log_file = f'{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.log'
 
     logger = Logger(logger_name=logger_name, log_path=log_path, log_file=log_file)

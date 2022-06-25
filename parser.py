@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser(description='General Attention for Point Cloud 
 
 parser.add_argument('--proj_name', type=str, default='Perceiver', metavar='N',
                     help='Name of the project')
-parser.add_argument('--exp_name', type=str, default='try', metavar='N',
+parser.add_argument('--exp_name', type=str, default='1CL1SB6SL_4', metavar='N',
                     help='Name of the experiment')
 
 parser.add_argument('--main_program', type=str, default='main.py', metavar='N',
@@ -128,6 +128,17 @@ parser.add_argument('--class_choice', type=str, default=None, metavar='N',
                     choices=['airplane', 'bag', 'cap', 'car', 'chair',
                                 'earphone', 'guitar', 'knife', 'lamp', 'laptop', 
                                 'motor', 'mug', 'pistol', 'rocket', 'skateboard', 'table'])
+parser.add_argument('--svm_coff', type=float, default=0.1, help='linear_svm coefficient')
+
+# few-shot learning
+parser.add_argument('--n_runs', type=int, default=10,
+                        help='Num of few-shot runs')
+parser.add_argument('--k_way', type=int, default=5,
+                        help='Num of classes in few-shot')
+parser.add_argument('--n_shot', type=int, default=10,
+                        help='Num of samples in one class')
+parser.add_argument('--n_query', type=int, default=20,
+                        help='Num of query samples in one class')
 
 # wandb settings
 parser.add_argument('--wb_url', type=str, default="http://202.112.113.239:28282", help='wandb server url')
