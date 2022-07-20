@@ -1,7 +1,6 @@
 import os
 import shutil
 import logging
-import wandb
 import numpy as np
 
 import torch
@@ -10,7 +9,7 @@ import torch.nn.functional as F
 from parser import args
 
 from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head, \
-        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
+        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter, PerceiverEncoder_partseg
 from perceiver.model.image import ImageInputAdapter
 from perceiver.model.pointcloud import PointCloudInputAdapter
 
@@ -183,6 +182,39 @@ def build_finetune_model(rank=None):
     return model
 
 
+def build_ft_partseg(rank=None):
+    input_adapter = PointCloudInputAdapter(
+        pointcloud_shape=(args.num_pt_points, 3),
+        num_input_channels=args.num_latent_channels,
+        num_groups=args.num_groups,
+        group_size=args.group_size)
+    output_adapter = ClassificationOutputAdapter(
+        num_classes=args.num_classes,
+        num_output_queries=args.output_seq_length,
+        num_output_query_channels=args.num_latent_channels)
+    model = PerceiverEncoder_partseg(
+        input_adapter=input_adapter,
+        output_adapter=output_adapter,
+        num_latents=args.num_pc_latents,  # N
+        num_latent_channels=args.num_latent_channels,  # D
+        num_cross_attention_heads=args.num_ca_heads,
+        num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
+        num_cross_attention_v_channels=None,
+        num_cross_attention_layers=args.num_ca_layers,
+        first_cross_attention_layer_shared=False,
+        cross_attention_widening_factor=args.mlp_widen_factor,
+        num_self_attention_heads=args.num_sa_heads,
+        num_self_attention_qk_channels=None,
+        num_self_attention_v_channels=None,
+        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
+        num_self_attention_blocks=args.num_sa_blocks,
+        first_self_attention_block_shared=True,
+        self_attention_widening_factor=args.mlp_widen_factor,
+        dropout=args.atten_drop)
+
+    return model.to(rank)
+
+
 def init(proj_name, exp_name, main_program, model_name):
     if not os.path.exists('runs'):
         os.makedirs('runs')
@@ -199,10 +231,6 @@ def init(proj_name, exp_name, main_program, model_name):
     shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     shutil.copy('utils.py', os.path.join('runs', proj_name, exp_name, 'files'))
     
-    # Actually, wandb login once is enough
-    os.environ["WANDB_BASE_URL"] = args.wb_url
-    wandb.login(key=args.wb_key)
-
     # to fix BlockingIOError: [Errno 11]
     os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 

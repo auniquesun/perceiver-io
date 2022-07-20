@@ -28,9 +28,11 @@ parser.add_argument('--eval', action='store_true',  help='evaluate the model')
 parser.add_argument('--epochs', type=int, default=300, metavar='N',
                     help='number of episode to train ')
 parser.add_argument('--batch_size', type=int, default=16, metavar='batch_size',
-                    help='Size of batch)')
-parser.add_argument('--test_batch_size', type=int, default=16, metavar='batch_size',
-                    help='Size of test batch)')
+                    help='Size of batch')
+parser.add_argument('--test_batch_size', type=int, default=16, metavar='test_batch_size',
+                    help='Size of test batch')
+parser.add_argument('--num_workers', type=int, default=0, metavar='num_workers',
+                    help='number of processes to load data in host memory')
 
 # optimizer and learning schedule
 parser.add_argument('--optim', type=str, default='sgd', metavar='N',
@@ -94,7 +96,7 @@ parser.add_argument('--atten_drop', type=float, default=0.1,
 parser.add_argument('--mlp_drop', type=float, default=0.5,
                     help='dropout rate in MLP')
 
-parser.add_argument('--cmid_weight', type=float, default=2.0,
+parser.add_argument('--cmid_weight', type=float, default=1.0,
                     help='weight of loss_cmid')
 
 parser.add_argument('--img_height', type=int, default=224, help='input image height')
@@ -118,7 +120,8 @@ parser.add_argument('--world_size', type=int, default=6, help='number of GPUs')
 parser.add_argument('--master_addr', type=str, default='localhost', help='ip of master node')
 parser.add_argument('--master_port', type=str, default='12355', help='port of master node')
 
-# finetune specifics
+parser.add_argument('--pt_dataset', type=str, default='ModelNet40', help='the dataset used for '
+                    'evaluating the pretrained model')
 parser.add_argument('--ft_dataset', type=str, default='ModelNet40', help='finetune dataset')
 parser.add_argument('--num_classes', type=int, default=40, help='number of object classes')
 parser.add_argument('--output_seq_length', type=int, default=1, help='output sequence length')
@@ -141,7 +144,7 @@ parser.add_argument('--n_query', type=int, default=20,
                         help='Num of query samples in one class')
 
 # wandb settings
-parser.add_argument('--wb_url', type=str, default="http://202.112.113.239:28282", help='wandb server url')
-parser.add_argument('--wb_key', type=str, default="local-66548ed1d838753aa6c72555da8c798d184591b0", help='wandb login key')
+parser.add_argument('--wb_url', type=str, default="http://202.112.113.241:28282", help='wandb server url')
+parser.add_argument('--wb_key', type=str, default="local-9924b9666281a61be5d62b358e344c790f1c3954", help='wandb login key')
 
 args = parser.parse_args()

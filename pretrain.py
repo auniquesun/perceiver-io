@@ -41,6 +41,8 @@ def cleanup():
 
 def main(rank, logger_name, log_path, log_file):
     if rank == 0:
+        os.environ["WANDB_BASE_URL"] = args.wb_url
+        wandb.login(key=args.wb_key)
         wandb.init(project=args.proj_name, name=args.exp_name)
 
     # NOTE: only write logs of the results obtained by
@@ -61,7 +63,7 @@ def main(rank, logger_name, log_path, log_file):
         sampler=train_sampler,
         batch_size=samples_per_gpu,
         shuffle=False,
-        num_workers=args.world_size,
+        num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False)
 
