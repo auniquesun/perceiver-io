@@ -84,6 +84,7 @@ parser.add_argument('--num_ca_layers', type=int, default=1, metavar='N', help='N
 parser.add_argument('--num_ca_heads', type=int, default=4, metavar='N', help='Number of heads in cross attention layer')
 parser.add_argument('--num_sa_layers_per_block', type=int, default=6, metavar='N', help='Number of layers in each block')
 parser.add_argument('--num_sa_blocks', type=int, default=1, metavar='N', help='Number of self attention blocks')
+parser.add_argument('--num_sa_layers', type=int, default=1, metavar='N', help='Number of self attention layers')
 parser.add_argument('--num_sa_heads', type=int, default=4,
                     help='number of heads in self attention')
 
@@ -123,7 +124,8 @@ parser.add_argument('--master_port', type=str, default='12355', help='port of ma
 parser.add_argument('--pt_dataset', type=str, default='ModelNet40', help='the dataset used for '
                     'evaluating the pretrained model')
 parser.add_argument('--ft_dataset', type=str, default='ModelNet40', help='finetune dataset')
-parser.add_argument('--num_classes', type=int, default=40, help='number of object classes')
+parser.add_argument('--num_obj_classes', type=int, default=40, help='number of object classes')
+parser.add_argument('--num_part_classes', type=int, default=50, help='number of object part classes')
 parser.add_argument('--output_seq_length', type=int, default=1, help='output sequence length')
 
 # downstream task: Segmentation settings

@@ -9,9 +9,9 @@ import torch.nn.functional as F
 from parser import args
 
 from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head, \
-        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter, PerceiverEncoder_partseg
+        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
-from perceiver.model.pointcloud import PointCloudInputAdapter
+from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer
 
 import torchvision.transforms as transforms
 
@@ -21,6 +21,18 @@ transform = transforms.Compose([transforms.Resize((args.img_height, args.img_wid
                                 transforms.RandomHorizontalFlip(),
                                 transforms.ToTensor(), 
                                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+
+category2part = {'Airplane': [0, 1, 2, 3], 'Bag': [4, 5], 'Cap': [6, 7], 'Car': [8, 9, 10, 11], 'Chair': [12, 13, 14, 15], 
+                    'Earphone': [16, 17, 18], 'Guitar': [19, 20, 21], 'Knife': [22, 23], 'Lamp': [24, 25, 26, 27], 'Laptop': [28, 29], 
+                    'Motorbike': [30, 31, 32, 33, 34, 35], 'Mug': [36, 37], 'Pistol': [38, 39, 40], 'Rocket': [41, 42, 43], 
+                    'Skateboard': [44, 45, 46], 'Table': [47, 48, 49]}
+part2category = { 0:'Airplane', 1:'Airplane', 2:'Airplane', 3:'Airplane', 4:'Bag', 5:'Bag', 6:'Cap', 7:'Cap', 
+                8:'Car', 9:'Car', 10:'Car', 11:'Car', 12:'Chair', 13:'Chair', 14:'Chair', 15:'Chair', 
+                16:'Earphone', 17:'Earphone', 18:'Earphone', 19:'Guitar', 20:'Guitar', 21:'Guitar', 22:'Knife', 23:'Knife',
+                24:'Lamp', 25:'Lamp', 26:'Lamp', 27:'Lamp', 28:'Laptop', 29:'Laptop', 30:'Motorbike', 31:'Motorbike',
+                32:'Motorbike', 33:'Motorbike', 34:'Motorbike', 35:'Motorbike', 36:'Mug', 37:'Mug', 38:'Pistol', 39:'Pistol',
+                40:'Pistol', 41:'Rocket', 42:'Rocket', 43:'Rocket', 44:'Skateboard', 45:'Skateboard', 46:'Skateboard',
+                47:'Table', 48:'Table', 49:'Table'}
 
 
 class AverageMeter(object):
@@ -59,8 +71,8 @@ class AccuracyMeter(object):
     def pos_count(self, pred, label):
         # torch.eq(a,b): Computes element-wise equality
         results = torch.eq(pred, label)
-        # x.item(): only one element tensors can be converted to Python scalars
-        return results.sum().item()
+        
+        return results.sum()
 
 
 class Logger(object):
@@ -137,7 +149,7 @@ def build_model():
     return pc_model, img_model
 
 
-def build_finetune_model(rank=None):
+def build_ft_cls(rank=None):
     ''' construct a point cloud model, which will finetune on downstream datasets
     '''
     input_adapter = PointCloudInputAdapter(
@@ -177,40 +189,33 @@ def build_finetune_model(rank=None):
         cross_attention_widening_factor=args.mlp_widen_factor,
         dropout=args.atten_drop).to(rank)
 
-    model = PerceiverIO(encoder, decoder).to(rank)
+    model = PerceiverIO(encoder, decoder)
 
     return model
 
 
 def build_ft_partseg(rank=None):
     input_adapter = PointCloudInputAdapter(
-        pointcloud_shape=(args.num_pt_points, 3),
+        pointcloud_shape=(args.num_ft_points, 3),
         num_input_channels=args.num_latent_channels,
         num_groups=args.num_groups,
         group_size=args.group_size)
-    output_adapter = ClassificationOutputAdapter(
-        num_classes=args.num_classes,
-        num_output_queries=args.output_seq_length,
-        num_output_query_channels=args.num_latent_channels)
-    model = PerceiverEncoder_partseg(
+
+    model = CrossFormer(
         input_adapter=input_adapter,
-        output_adapter=output_adapter,
-        num_latents=args.num_pc_latents,  # N
-        num_latent_channels=args.num_latent_channels,  # D
-        num_cross_attention_heads=args.num_ca_heads,
-        num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
-        num_cross_attention_v_channels=None,
+        num_latents=args.num_pc_latents,
+        num_latent_channels=args.num_latent_channels,
+        group_size=args.group_size,
         num_cross_attention_layers=args.num_ca_layers,
-        first_cross_attention_layer_shared=False,
-        cross_attention_widening_factor=args.mlp_widen_factor,
+        num_cross_attention_heads=args.num_ca_heads,
+        num_self_attention_layers=args.num_sa_layers,
         num_self_attention_heads=args.num_sa_heads,
-        num_self_attention_qk_channels=None,
-        num_self_attention_v_channels=None,
-        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
-        num_self_attention_blocks=args.num_sa_blocks,
-        first_self_attention_block_shared=True,
-        self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop)
+        mlp_widen_factor=args.mlp_widen_factor,
+        max_dpr=args.max_dpr,
+        atten_drop=args.atten_drop,
+        mlp_drop=args.mlp_drop,
+        layer_idx=[3,7,11],
+        num_part_classes=args.num_part_classes)
 
     return model.to(rank)
 
@@ -228,7 +233,7 @@ def init(proj_name, exp_name, main_program, model_name):
         os.makedirs(os.path.join('runs', proj_name, exp_name, 'models'))
 
     shutil.copy(main_program, os.path.join('runs', proj_name, exp_name, 'files'))
-    shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
+    shutil.copy(f'perceiver/model/pointcloud/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     shutil.copy('utils.py', os.path.join('runs', proj_name, exp_name, 'files'))
     
     # to fix BlockingIOError: [Errno 11]
