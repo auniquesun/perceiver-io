@@ -1,8 +1,6 @@
 import os
-from datetime import datetime
 import wandb
-import numpy as np
-import sklearn.metrics as metrics
+from datetime import datetime
 
 import torch
 import torch.optim as optim
@@ -13,15 +11,13 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-
-from torch.cuda.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.nn import CrossEntropyLoss
 
 from datasets.shapenet_part import ShapeNetPart
 from torch.utils.data import DataLoader
 
-from utils import init, calculate_shape_IoU, Logger, AverageMeter
-from utils import build_finetune_model, partseg_loss
+from utils import AccuracyMeter, init, Logger, AverageMeter
+from utils import build_ft_partseg, category2part, part2category
 from parser import args
 
 
@@ -39,6 +35,8 @@ def cleanup():
 
 def main(rank, logger_name, log_path, log_file):
     if rank == 0:
+        os.environ["WANDB_BASE_URL"] = args.wb_url
+        wandb.login(key=args.wb_key)
         wandb.init(project=args.proj_name, name=args.exp_name)
 
     logger = Logger(logger_name=logger_name, log_path=log_path, log_file=log_file)
@@ -54,36 +52,35 @@ def main(rank, logger_name, log_path, log_file):
                     sampler=train_sampler,
                     batch_size=samples_per_gpu, 
                     shuffle=False, 
-                    num_workers=args.world_size,
+                    num_workers=args.num_workers,
                     pin_memory=True,
                     drop_last=False)
 
-    val_dataset = ShapeNetPart(partition='test', num_points=args.num_ft_points)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=args.world_size, rank=rank)
+    test_dataset = ShapeNetPart(partition='test', num_points=args.num_ft_points)
+    test_sampler = DistributedSampler(test_dataset, num_replicas=args.world_size, rank=rank)
 
-    val_samples_per_gpu = args.test_batch_size // args.world_size
-    test_loader = DataLoader(val_dataset, 
-                            sampler=val_sampler,
-                            batch_size=val_samples_per_gpu, 
+    test_samples_per_gpu = args.test_batch_size // args.world_size
+    test_loader = DataLoader(test_dataset, 
+                            sampler=test_sampler,
+                            batch_size=test_samples_per_gpu, 
                             shuffle=False, 
                             num_workers=0, 
                             pin_memory=True, 
                             drop_last=False)
     
-    seg_num_all = train_loader.dataset.seg_num_all
+    num_part_classes = train_loader.dataset.seg_num_all
     seg_start_index = train_loader.dataset.seg_start_index
 
-    model = build_finetune_model(rank=rank)
+    model = build_ft_partseg(rank=rank)
     model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
     # ----- load pretrained model
-    assert args.resume, 'Finetuning Perceiver_partseg requires pretrained model weights'
-    map_location = torch.device('cuda:%d' % rank)
-    pretrained = torch.load(args.pc_model_file, map_location=map_location)
-    # append `module.` before key
-    pretrained = {"module."+key: value for key, value in pretrained.items()}
-
-    model_ddp.load_state_dict(pretrained, strict=False)
+    # assert args.resume, 'Finetuning Perceiver_partseg requires pretrained model weights'
+    # map_location = torch.device('cuda:%d' % rank)
+    # pretrained = torch.load(args.pc_model_file, map_location=map_location)
+    # # append `module.` at the beginning of key
+    # pretrained = {"module."+key: value for key, value in pretrained.items()}
+    # model_ddp.load_state_dict(pretrained, strict=False)
 
     if args.optim == 'sgd':
         optimizer = optim.SGD(
@@ -128,11 +125,10 @@ def main(rank, logger_name, log_path, log_file):
             optimizer, 
             step_size=args.step_size)
 
-    criterion = partseg_loss
-    scaler = GradScaler()
+    criterion = CrossEntropyLoss(label_smoothing=0.2)
 
-    ft_train_best_iou = .0
-    ft_test_best_iou = .0
+    train_best_acc = .0
+    test_best_mean_part_iou = .0
     for epoch in range(args.epochs):
         # ------ Train
         model_ddp.train()
@@ -140,165 +136,174 @@ def main(rank, logger_name, log_path, log_file):
         train_sampler.set_epoch(epoch)
 
         train_loss = AverageMeter()
-        train_true_cls = []
-        train_pred_cls = []
-        train_true_seg = []
-        train_pred_seg = []
-        train_label_seg = []
+        points_seg_acc = AccuracyMeter()
 
-        # 这个训练代码看起来好乱，numpy和torch混起来用
-        for data, label, seg in train_loader:
+        for points, obj_label, partseg_label in train_loader:
+            # points: [batch, num_points, 3]
+            # obj_label: [batch, 1], label of object categories
+            # partseg_label: [batch, num_points], label of object parts
             optimizer.zero_grad(set_to_none=True)
             
-            with autocast():
-                seg = seg - seg_start_index
-                data, seg = data.to(rank), seg.to(rank)
-                batch_size = data.size()[0]
-                seg_pred = model_ddp(data)
-                loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            batch_size, num_points, _ = points.size()
+            label_onehot = torch.zeros(batch_size, args.num_obj_classes, device=f'cuda:{rank}')
+            for i in range(batch_size):
+                label_onehot[i, obj_label[i]] = 1
+            partseg_label = partseg_label - seg_start_index
+            points, partseg_label = points.to(rank), partseg_label.to(rank)
+            # partseg_pred: [batch, num_points, num_part_classes]
+            partseg_pred = model_ddp(points, label_onehot)
+            # partseg_pred = model_ddp(points)
+            loss = criterion(partseg_pred.reshape(-1, num_part_classes), partseg_label.reshape(-1))
+            train_loss.update(loss, batch_size)
 
-            train_loss.update(loss.item(), batch_size)
-            pred = seg_pred.max(dim=2)[1]               # (batch_size, num_points)
-            seg_np = seg.cpu().numpy()                  # (batch_size, num_points)
-            pred_np = pred.detach().cpu().numpy()       # (batch_size, num_points)
-            train_true_cls.append(seg_np.reshape(-1))       # (batch_size * num_points)
-            train_pred_cls.append(pred_np.reshape(-1))      # (batch_size * num_points)
-            train_true_seg.append(seg_np)
-            train_pred_seg.append(pred_np)
-            train_label_seg.append(label.reshape(-1))
+            refined_pred = torch.zeros(batch_size, num_points, dtype=torch.int32, device=f'cuda:{rank}')
+            for i in range(batch_size):
+                # partseg_label[i, 0] is a tensor, it should be converted to an integer to serve as an index
+                idx = partseg_label[i, 0].item()
+                cat = part2category[idx]
+                logits = partseg_pred[i, :, :]
+                refined_pred[i, :] = torch.argmax(logits[:, category2part[cat]], dim=1) + category2part[cat][0]
+            pos = points_seg_acc.pos_count(refined_pred, partseg_label)
+            points_seg_acc.update(pos, batch_size*num_points-pos, batch_size*num_points)
 
-        train_true_cls = np.concatenate(train_true_cls)
-        train_pred_cls = np.concatenate(train_pred_cls)
+            loss.backward()
+            # clip grad to prevent exploding
+            torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), 10, norm_type=2)
+            optimizer.step()
 
-        train_acc = metrics.accuracy_score(train_true_cls, train_pred_cls)
-
-        avg_per_class_acc = metrics.balanced_accuracy_score(train_true_cls, train_pred_cls)
-
-        train_true_seg = np.concatenate(train_true_seg, axis=0)
-        train_pred_seg = np.concatenate(train_pred_seg, axis=0)
-        train_label_seg = np.concatenate(train_label_seg)
-        train_ious = calculate_shape_IoU(train_pred_seg, train_true_seg, train_label_seg, args.class_choice)
-        train_iou = np.mean(train_ious)
-
-        outstr = 'FT_train (%d/%d), loss: %.6f, ft_acc: %.6f, ft_avg acc: %.6f, ft_iou: %.6f' % \
-                 (epoch, args.epochs, train_loss.avg, train_acc, avg_per_class_acc, train_iou)
+        train_loss, train_acc = train_loss.avg.item(), points_seg_acc.num_pos.item()/points_seg_acc.total
+        outstr = 'Train (%d/%d), train_loss: %.6f, point_level_acc: %.6f' % (epoch, args.epochs, train_loss, train_acc)
         logger.write(outstr, rank=rank)
 
         # ------ Test
         with torch.no_grad():
-            # logger.write('Start testing on the %s test set ...' % args.ft_dataset, rank=rank)
-            outstr, test_loss, test_acc, test_acc_per_class, test_iou = test(rank, epoch, model_ddp, test_loader, criterion)
+            test_mean_part_iou, test_mean_category_iou, test_mean_part_acc, test_point_level_acc, test_loss = \
+                test(rank, model_ddp, test_loader, criterion)
+            outstr = 'Test (%d/%d), mean_part_iou: %.6f, mean_category_iou: %.6f, mean_part_acc: %.6f, point_level_acc: %.6f, test_loss: %.6f' % \
+            (epoch, args.epochs, test_mean_part_iou, test_mean_category_iou, test_mean_part_acc, test_point_level_acc, test_loss)
             logger.write(outstr, rank=rank)
 
             if rank == 0:
-                if train_iou > ft_train_best_iou:
-                    ft_train_best_iou = train_iou
+                if train_acc > train_best_acc:
+                    train_best_acc = train_acc
 
-                if test_iou > ft_test_best_iou:
-                    ft_test_best_iou = test_iou
-                    logger.write(f'Find new highest Mean IoU score: {ft_test_best_iou} !', rank=rank)
+                if test_mean_part_iou > test_best_mean_part_iou:
+                    test_best_mean_part_iou = test_mean_part_iou
+                    logger.write(f'Find new highest Mean IoU score: {test_best_mean_part_iou} !', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
+                    save_state = {'epoch': epoch, # start from 0
+                        'test_mean_part_iou': test_mean_part_iou,
+                        'test_mean_category_iou': test_mean_category_iou, 
+                        'test_mean_part_acc': test_mean_part_acc,
+                        'test_point_level_acc': test_point_level_acc,
+                        'model_state_dict': model_ddp.module.state_dict(),
+                        'optim_state_dict': optimizer.state_dict()}
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'model_best.pth')
-                    torch.save(model_ddp.module.state_dict(), save_path)
+                    torch.save(save_state, save_path)
                 
-                if epoch % args.save_freq == 0:
-                    logger.write(f'Saving {epoch}th model ...', rank=rank)
-                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_epoch{epoch}.pth')
-                    torch.save(model_ddp.module.state_dict(), save_path)
-
                 wandb_log = dict()
                 if args.scheduler == 'coswarm':
                     wandb_log['learning_rate'] = lr_scheduler.get_lr()[0]
                 else:
                     wandb_log['learning_rate'] = lr_scheduler.get_last_lr()[0]
-                wandb_log["ft_train_loss"] = train_loss.avg
-                wandb_log["ft_train_acc"] = train_acc
-                wandb_log["ft_train_acc_per_class"] = avg_per_class_acc
-                wandb_log["ft_train_mean_iou"] = train_iou
-                wandb_log["ft_train_best_iou"] = ft_train_best_iou
-                wandb_log["ft_test_loss"] = test_loss
-                wandb_log["ft_test_acc"] = test_acc
-                wandb_log["ft_test_acc_per_class"] = test_acc_per_class
-                wandb_log["ft_test_mean_iou"] = test_iou
-                wandb_log["ft_test_best_iou"] = ft_test_best_iou
+                wandb_log["train_loss"] = train_loss
+                wandb_log["train_acc"] = train_acc
+                wandb_log["test_point_level_acc"] = test_point_level_acc
+                wandb_log["test_mean_part_acc"] = test_mean_part_acc
+                wandb_log["test_mean_part_iou"] = test_mean_part_iou
+                wandb_log["test_mean_category_iou"]= test_mean_category_iou
+                wandb_log["test_best_mean_part_iou"] = test_best_mean_part_iou
+                wandb_log["test_loss"] = test_loss
                 wandb.log(wandb_log)
 
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write('Saving the last model ...', rank=rank)
-        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_last.pth')
-        torch.save(model_ddp.module.state_dict(), save_path)
-        logger.write(f'Final highest Mean IoU score: {ft_test_best_iou} !', rank=rank)
+        logger.write(f'Final highest Mean IoU score: {test_best_mean_part_iou} !', rank=rank)
         logger.write('End of DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
         wandb.finish()
     cleanup()
 
 
-def test(rank, epoch, model, test_loader, criterion):
+def test(rank, model, test_loader, criterion):
     model.eval()
 
-    seg_num_all = test_loader.dataset.seg_num_all
+    num_part_classes = test_loader.dataset.seg_num_all
     seg_start_index = test_loader.dataset.seg_start_index
 
     test_loss = AverageMeter()
-    test_true_cls = []
-    test_pred_cls = []
-    test_true_seg = []
-    test_pred_seg = []
-    test_label_seg = []
-    for data, label, seg in test_loader:
-        seg = seg - seg_start_index
-        
-        data, seg = data.to(rank), seg.to(rank)
-        batch_size = data.size()[0]
-        # seg_pred: [batch_size, num_points, seg_num_all]
-        seg_pred = model(data)
-        loss = criterion(seg_pred.view(-1, seg_num_all), seg.view(-1,1).squeeze())
-        test_loss.update(loss.item(), batch_size)
-        pred = seg_pred.max(dim=2)[1]
-        seg_np = seg.cpu().numpy()
-        pred_np = pred.detach().cpu().numpy()
-        test_true_cls.append(seg_np.reshape(-1))
-        test_pred_cls.append(pred_np.reshape(-1))
-        test_true_seg.append(seg_np)
-        test_pred_seg.append(pred_np)
-        test_label_seg.append(label.reshape(-1))
+    points_seg_acc = AccuracyMeter()
+   
+    part2correct, part2total = torch.zeros(num_part_classes, device=f'cuda:{rank}'), torch.zeros(num_part_classes, device=f'cuda:{rank}')
+    shape_ious = {obj:[] for obj in category2part.keys()}
 
-    # tmp = [1.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(tmp, test_loss.avg)
-    # test_loss = np.mean(tmp)
+    for points, obj_label, partseg_label in test_loader:
+        # obj_label: [batch, 1]
+        batch_size, num_points, _ = points.size()
+        label_onehot = torch.zeros(batch_size, args.num_obj_classes, device=f'cuda:{rank}')
+        for i in range(batch_size):
+            label_onehot[i, obj_label[i]] = 1
+        # partseg_label: [batch, num_points]
+        partseg_label = partseg_label - seg_start_index
 
-    test_true_cls = np.concatenate(test_true_cls)
-    test_pred_cls = np.concatenate(test_pred_cls)
+        points, partseg_label = points.to(rank), partseg_label.to(rank)
+        # partseg_pred: [batch_size, num_points, num_part_classes]
+        partseg_pred = model(points, label_onehot)
+        # partseg_pred = model(points)
+        loss = criterion(partseg_pred.reshape(-1, num_part_classes), partseg_label.reshape(-1))
+        test_loss.update(loss, batch_size)
 
-    test_acc = metrics.accuracy_score(test_true_cls, test_pred_cls)
-    # tmp = [1.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(tmp, test_acc)
-    # test_acc = np.mean(tmp)
+        # NOTE: the following loop ensures the predictions happen on the target object category
+        tmp = partseg_label.cpu().numpy()   # copy `partseg_label` to cpu because `tmp[i, 0]` will serve as an index
+        refined_pred = torch.zeros(batch_size, num_points, dtype=torch.int32, device=f'cuda:{rank}')
+        for i in range(batch_size):
+            # partseg_label[i, 0] is a tensor, it should be converted to an integer to serve as an index
+            idx = partseg_label[i, 0].item()
+            cat = part2category[idx]
+            logits = partseg_pred[i, :, :]
+            refined_pred[i, :] = torch.argmax(logits[:, category2part[cat]], dim=1) + category2part[cat][0]
 
-    avg_per_class_acc = metrics.balanced_accuracy_score(test_true_cls, test_pred_cls)
-    # tmp = [1.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(tmp, avg_per_class_acc)
-    # test_acc_per_class = np.mean(tmp)
+        pos = points_seg_acc.pos_count(refined_pred, partseg_label)
+        points_seg_acc.update(pos, batch_size*num_points-pos, batch_size*num_points)
 
-    test_true_seg = np.concatenate(test_true_seg, axis=0)
-    test_pred_seg = np.concatenate(test_pred_seg, axis=0)
-    test_label_seg = np.concatenate(test_label_seg)
-    shape_ious = calculate_shape_IoU(test_pred_seg, test_true_seg, test_label_seg, args.class_choice)
+        for i in range(num_part_classes):
+            # torch.eq expects one of 
+            #   * (Tensor input, Tensor other, *, Tensor out)
+            #   * (Tensor input, Number other, *, Tensor out)
+            part2correct[i] += torch.eq(refined_pred, i).sum()
+            part2total[i] += torch.eq(partseg_label, i).sum()
 
-    test_iou_per_gpu = np.mean(shape_ious)
-    # tmp = [1.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(tmp, test_iou_per_gpu)
-    # test_iou = np.mean(tmp)
+        for i in range(batch_size):
+            pred, gt = refined_pred[i, :], partseg_label[i, :]
+            part = gt[0].item()    # `0th` point in the point cloud belongs to one part, gt[0].item() converts to a number to serve as an index
+            cat = part2category[part]     # find the object category of this part
+            part_ious = [.0 for _ in range(len(category2part[cat]))]
 
-    outstr = 'FT_test (%d/%d), loss: %.6f, test acc: %.6f, test avg acc: %.6f, test iou: %.6f' % \
-            (epoch, args.epochs, test_loss.avg, test_acc, avg_per_class_acc, test_iou_per_gpu)
+            for j, part in enumerate(category2part[cat]):
+                if j == 0:
+                    start_id = category2part[cat][0]
+                if torch.logical_or(torch.eq(gt, part), torch.eq(pred, part)).sum() == 0:
+                    part_ious[part - start_id] = 1
+                else:
+                    intersection = torch.logical_and(torch.eq(gt, part), torch.eq(pred, part)).sum()
+                    union = torch.logical_or(torch.eq(gt, part), torch.eq(pred, part)).sum()
+                    part_ious[part - start_id] = intersection / union
+            shape_ious[cat].append(torch.mean(torch.tensor(part_ious)))
+
+    all_part_ious = []
+    for cat in shape_ious.keys():
+        for iou in shape_ious[cat]:
+            all_part_ious.append(iou)
+        shape_ious[cat] = torch.mean(torch.tensor(shape_ious[cat]))
+    mean_part_iou = torch.mean(torch.tensor(all_part_ious))
     
-    return outstr, test_loss.avg, test_acc, avg_per_class_acc, test_iou_per_gpu
+    category_ious = [cat_iou for cat_iou in shape_ious.values()]
+    mean_category_iou = torch.mean(torch.tensor(category_ious))
+
+    mean_part_acc = torch.mean(part2correct/part2total)
+    point_level_acc = points_seg_acc.num_pos/points_seg_acc.total
+
+    return mean_part_iou.item(), mean_category_iou.item(), mean_part_acc.item(), point_level_acc.item(), test_loss.avg.item()
 
 
 if __name__ == "__main__":
