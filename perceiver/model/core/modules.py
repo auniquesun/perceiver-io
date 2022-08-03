@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 from fairscale.nn import checkpoint_wrapper
-from torch import Tensor, dropout
+from torch import Tensor
 
 from perceiver.model.core.utils import Sequential
 
@@ -177,7 +177,7 @@ class CrossAttentionLayer(Sequential):
         )
         super().__init__(
             Residual(cross_attn, dropout) if attention_residual else cross_attn,
-            Residual(MLP(num_q_input_channels, widening_factor), dropout=0.5),
+            Residual(MLP(num_q_input_channels, widening_factor), 0.5),
         )
     # 这里前向传播函数应该是省掉了，因为继承了 Sequential
     # The forward() method of Sequential accepts any input and forwards it to the first module it contains. 
@@ -203,7 +203,7 @@ class SelfAttentionLayer(Sequential):
         )
         super().__init__(
             Residual(self_attn, dropout),
-            Residual(MLP(num_channels, widening_factor), dropout=0.5),
+            Residual(MLP(num_channels, widening_factor), 0.5),
         )
 
 
@@ -291,7 +291,7 @@ class OutputAdapter(nn.Module):
         self._init_parameters()
 
     def _init_parameters(self):
-        with torch.no_grad():
+        with torch.no_grad():   # 这里不会影响 self._output_query 本身是带梯度的
             # 把数值范围限定在 (-2.0, 2.0)
             self._output_query.normal_(0.0, 0.02).clamp_(-2.0, 2.0)
 
@@ -463,6 +463,12 @@ class PerceiverEncoder_feats_head(PerceiverEncoder):
         self.latent_head = nn.Sequential(
             nn.BatchNorm1d(num_latent_channels),
             nn.Linear(num_latent_channels, num_latent_channels, bias = False))
+        # self.latent_head = nn.Sequential(
+        #     nn.BatchNorm1d(num_latent_channels),
+        #     nn.Linear(num_latent_channels, num_latent_channels, bias = False),
+        #     nn.BatchNorm1d(num_latent_channels),
+        #     nn.ReLU(),
+        #     nn.Linear(num_latent_channels, num_latent_channels, bias = False))
 
     def forward(self, x, pad_mask=None):
         b, *_ = x.shape
@@ -481,9 +487,10 @@ class PerceiverEncoder_feats_head(PerceiverEncoder):
                 x_latent = self.cross_attn_n(x_latent, x, pad_mask)
             x_latent = self.self_attn_n(x_latent)
 
-        x_latent_feats = self.latent_head(x_latent.max(1)[0])
+        backbone_feats = x_latent.max(1)[0]
+        x_latent_feats = self.latent_head(backbone_feats)
 
-        return x_latent_feats
+        return x_latent_feats, backbone_feats
 
 
 class PerceiverDecoder(nn.Module):

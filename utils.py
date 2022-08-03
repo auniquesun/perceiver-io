@@ -8,8 +8,8 @@ import torch.nn.functional as F
 
 from parser import args
 
-from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head, \
-        PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
+from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head
+from perceiver.model.core import PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
 from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer
 
@@ -76,7 +76,7 @@ class AccuracyMeter(object):
 
 
 class Logger(object):
-    def __init__(self, logger_name='PointMAE', log_level=logging.INFO, log_path='runs', log_file='train.log'):
+    def __init__(self, logger_name='Test', log_level=logging.INFO, log_path='runs', log_file='test.log'):
         logger = logging.getLogger(logger_name)
         logger.setLevel(log_level)
 
@@ -92,15 +92,15 @@ class Logger(object):
             self.logger.info(msg)
 
 
-def build_model():
-    ''' construct a point cloud  and an image model, 
+def build_model(rank=None):
+    ''' construct a point cloud and an image model, 
             which will pretrain on a selected dataset
     '''
     pc_input_adapter = PointCloudInputAdapter(
         pointcloud_shape=(args.num_pt_points, 3),
         num_input_channels=args.num_latent_channels,
         num_groups=args.num_groups,
-        group_size=args.group_size)
+        group_size=args.group_size).to(rank)
 
     # Generic Perceiver encoder
     pc_model = PerceiverEncoder_feats_head(
@@ -120,11 +120,11 @@ def build_model():
         num_self_attention_blocks=args.num_sa_blocks,
         first_self_attention_block_shared=True,
         self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop)
+        dropout=args.atten_drop).to(rank)
 
     img_input_adapter = ImageInputAdapter(
         image_shape=(args.img_height, args.img_width, 3),
-        num_frequency_bands=64)
+        num_frequency_bands=64).to(rank)
 
     # Generic Perceiver encoder
     img_model = PerceiverEncoder_feats_head(
@@ -144,7 +144,7 @@ def build_model():
         num_self_attention_blocks=args.num_sa_blocks,
         first_self_attention_block_shared=True,
         self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop)
+        dropout=args.atten_drop).to(rank)
 
     return pc_model, img_model
 
@@ -156,7 +156,7 @@ def build_ft_cls(rank=None):
         pointcloud_shape=(args.num_pt_points, 3),
         num_input_channels=args.num_latent_channels,
         num_groups=args.num_groups,
-        group_size=args.group_size)
+        group_size=args.group_size).to(rank)
     encoder = PerceiverEncoder(
         input_adapter=input_adapter,
         num_latents=args.num_pc_latents,  # N
@@ -177,9 +177,9 @@ def build_ft_cls(rank=None):
         dropout=args.atten_drop).to(rank)
 
     output_adapter = ClassificationOutputAdapter(
-        num_classes=args.num_classes,
+        num_classes=args.num_obj_classes,
         num_output_queries=args.output_seq_length,
-        num_output_query_channels=args.num_latent_channels)
+        num_output_query_channels=args.num_latent_channels).to(rank)
     decoder = PerceiverDecoder(
         output_adapter=output_adapter,
         num_latent_channels=args.num_latent_channels,  # D
@@ -189,7 +189,7 @@ def build_ft_cls(rank=None):
         cross_attention_widening_factor=args.mlp_widen_factor,
         dropout=args.atten_drop).to(rank)
 
-    model = PerceiverIO(encoder, decoder)
+    model = PerceiverIO(encoder, decoder).to(rank)
 
     return model
 
@@ -199,7 +199,7 @@ def build_ft_partseg(rank=None):
         pointcloud_shape=(args.num_ft_points, 3),
         num_input_channels=args.num_latent_channels,
         num_groups=args.num_groups,
-        group_size=args.group_size)
+        group_size=args.group_size).to(rank)
 
     model = CrossFormer(
         input_adapter=input_adapter,
@@ -214,10 +214,10 @@ def build_ft_partseg(rank=None):
         max_dpr=args.max_dpr,
         atten_drop=args.atten_drop,
         mlp_drop=args.mlp_drop,
-        layer_idx=[3,7,11],
-        num_part_classes=args.num_part_classes)
+        layer_idx=args.layer_idx,
+        num_part_classes=args.num_part_classes).to(rank)
 
-    return model.to(rank)
+    return model
 
 
 def init(proj_name, exp_name, main_program, model_name):
@@ -233,7 +233,10 @@ def init(proj_name, exp_name, main_program, model_name):
         os.makedirs(os.path.join('runs', proj_name, exp_name, 'models'))
 
     shutil.copy(main_program, os.path.join('runs', proj_name, exp_name, 'files'))
-    shutil.copy(f'perceiver/model/pointcloud/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
+    if main_program == 'ft_partseg.py':
+        shutil.copy(f'perceiver/model/pointcloud/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
+    else:
+        shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     shutil.copy('utils.py', os.path.join('runs', proj_name, exp_name, 'files'))
     
     # to fix BlockingIOError: [Errno 11]

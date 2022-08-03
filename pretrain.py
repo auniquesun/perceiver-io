@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
 from torch.utils.data import DataLoader
-from datasets.data import ShapeNetRender, ModelNet40SVM
+from datasets.data import ShapeNetRender, ModelNet40SVM, ScanObjectNNSVM
 
 from utils import build_model, transform
 from sklearn.svm import SVC
@@ -68,16 +68,24 @@ def main(rank, logger_name, log_path, log_file):
         drop_last=False)
 
     # here set `num_workers=0` because ModelNet40 has much less samples than ShapeNet 
-    # thus smaller len(train_val_loader) and len(test_val_loader)
-    train_val_loader = DataLoader(
-        ModelNet40SVM(partition='train', num_points=args.num_test_points), 
-        batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    test_val_loader = DataLoader(
-        ModelNet40SVM(partition='test', num_points=args.num_test_points), 
-        batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    #   thus smaller len(train_val_loader) and len(test_val_loader)
+    if args.pt_dataset == 'ModelNet40':
+        train_val_loader = DataLoader(
+            ModelNet40SVM(partition='train', num_points=args.num_test_points), 
+            batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+        test_val_loader = DataLoader(
+            ModelNet40SVM(partition='test', num_points=args.num_test_points), 
+            batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    elif args.pt_dataset == 'ScanObjectNN':
+        train_val_loader = DataLoader(
+            ScanObjectNNSVM(partition='train', num_points=args.num_test_points), 
+            batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
+        test_val_loader = DataLoader(
+            ScanObjectNNSVM(partition='test', num_points=args.num_test_points), 
+            batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
 
-    pc_model, img_model = build_model()
-    pc_model, img_model = pc_model.to(rank), img_model.to(rank)
+    pc_model, img_model = build_model(rank=rank)
+    pc_model, img_model = pc_model, img_model
 
     if args.resume:
         path = os.path.join('runs', args.proj_name, args.exp_name, 'models', args.pc_model_file)
@@ -109,7 +117,6 @@ def main(rank, logger_name, log_path, log_file):
     
     logger.write(f'Using {args.optim} optimizer ...', rank=rank)
 
-    # 这也是要调优的
     if args.scheduler == 'cos':
         lr_scheduler = CosineAnnealingLR(
             optimizer, 
@@ -160,8 +167,9 @@ def main(rank, logger_name, log_path, log_file):
                 batch_size = pc_t1.shape[0]
 
                 pc = torch.cat([pc_t1, pc_t2], dim=0)
-                pc_feats = pc_model_ddp(pc)
-                img_feats = img_model_ddp(imgs)
+                # pc_model_ddp(pc)[0] is the features with the projection head
+                pc_feats = pc_model_ddp(pc)[0]
+                img_feats = img_model_ddp(imgs)[0]
 
                 pc_t1_feats = pc_feats[:batch_size, :]
                 pc_t2_feats = pc_feats[batch_size:, :]
@@ -175,6 +183,11 @@ def main(rank, logger_name, log_path, log_file):
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
+            # total_loss.backward()
+            # # clip grad to prevent exploding, following Point-MAE and Point-Bert
+            # torch.nn.utils.clip_grad_norm_(pc_model_ddp.parameters(), 10, norm_type=2)
+            # torch.nn.utils.clip_grad_norm_(img_model_ddp.parameters(), 10, norm_type=2)
+            # optimizer.step()
 
             train_imid_loss.update(loss_imid.item(), batch_size)
             train_cmid_loss.update(loss_cmid.item(), batch_size)
@@ -185,18 +198,6 @@ def main(rank, logger_name, log_path, log_file):
                              f'Loss IMID: {loss_imid}, Loss CMID: {loss_cmid} '
                              f'Loss Total: {total_loss}', rank=rank)
 
-        # tmp = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(tmp, train_imid_loss.avg)
-        # overall_train_imid_loss = np.mean(tmp)
-
-        # tmp = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(tmp, train_cmid_loss.avg)
-        # overall_train_cmid_loss = np.mean(tmp)
-
-        # tmp = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(tmp, train_loss.avg)
-        # overall_train_loss = np.mean(tmp)
-
         # ------ Test
         with torch.no_grad():   # it will disable gradients computation and save memory
             pc_model_ddp.eval()
@@ -206,10 +207,12 @@ def main(rank, logger_name, log_path, log_file):
             train_labels = []
 
             for i, (data, label) in enumerate(train_val_loader):
-                labels = list(map(lambda x: x[0], label.numpy().tolist()))
+                if args.pt_dataset == "ModelNet40":
+                    labels = list(map(lambda x: x[0],label.numpy().tolist()))
+                elif args.pt_dataset == "ScanObjectNN":
+                    labels = label.numpy().tolist()
                 data = data.to(rank)
-                with torch.no_grad():
-                    feats = pc_model_ddp(data)
+                feats = pc_model_ddp(data)[1]
                 feats = feats.detach().cpu().numpy()
                 train_feats.extend(feats)
                 train_labels.extend(labels)
@@ -229,10 +232,12 @@ def main(rank, logger_name, log_path, log_file):
             test_labels = []
 
             for i, (data, label) in enumerate(test_val_loader):
-                labels = list(map(lambda x: x[0], label.numpy().tolist()))
+                if args.pt_dataset == "ModelNet40":
+                    labels = list(map(lambda x: x[0],label.numpy().tolist()))
+                elif args.pt_dataset == "ScanObjectNN":
+                    labels = label.numpy().tolist()
                 data = data.to(rank)
-                with torch.no_grad():
-                    feats = pc_model_ddp(data)
+                feats = pc_model_ddp(data)[1]
                 feats = feats.detach().cpu().numpy()
                 test_feats.extend(feats)
                 test_labels.extend(labels)
@@ -241,30 +246,18 @@ def main(rank, logger_name, log_path, log_file):
             test_labels = np.array(test_labels)
 
             logger.write('Testing SVM ...', rank=rank)
-            test_accuracy = svm.score(test_feats, test_labels)
-
-            # tmp = [.0 for _ in range(args.world_size)]
-            # dist.all_gather_object(tmp, test_accuracy)
-            # overall_test_acc = np.mean(tmp)
-            overall_test_acc = test_accuracy
+            test_acc = svm.score(test_feats, test_labels)
 
             if rank == 0:
-                logger.write(f'Test Accuracy of SVM: {overall_test_acc}', rank=rank)
+                logger.write(f'Test Accuracy of SVM: {test_acc}', rank=rank)
 
-                if overall_test_acc > best_test_acc:
-                    best_test_acc = overall_test_acc
-                    logger.write(f'Finding new highest test score: {best_test_acc} !', rank=rank)
+                if test_acc > best_test_acc:
+                    best_test_acc = test_acc
+                    logger.write(f'Finding new best linear SVM score: {best_test_acc} !', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
                     torch.save(pc_model_ddp.module.state_dict(), save_path)
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'img_model_best.pth')
-                    torch.save(img_model_ddp.module.state_dict(), save_path)
-
-                if epoch % args.save_freq == 0:
-                    logger.write(f'Saving {epoch}th model ...', rank=rank)
-                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'pc_model_epoch{epoch}.pth')
-                    torch.save(pc_model_ddp.module.state_dict(), save_path)
-                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'img_model_epoch{epoch}.pth')
                     torch.save(img_model_ddp.module.state_dict(), save_path)
 
                 wandb_log = dict()
@@ -277,7 +270,7 @@ def main(rank, logger_name, log_path, log_file):
                 wandb_log['Pretrain Loss'] = train_loss.avg
                 wandb_log['Pretrain IMID Loss'] = train_imid_loss.avg
                 wandb_log['Pretrain CMID Loss'] = train_cmid_loss.avg
-                wandb_log['svm_test_acc'] = overall_test_acc
+                wandb_log['svm_test_acc'] = test_acc
                 wandb_log['svm_best_acc'] = best_test_acc
                 wandb.log(wandb_log)
 
@@ -285,12 +278,7 @@ def main(rank, logger_name, log_path, log_file):
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final highest test score: {best_test_acc} !', rank=rank)
-        logger.write(f'Saving the last model ...', rank=rank)
-        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'pc_model_last.pth')
-        torch.save(pc_model_ddp.module.state_dict(), save_path)
-        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'img_model_last.pth')
-        torch.save(img_model_ddp.module.state_dict(), save_path)
+        logger.write(f'Final best linear SVM score: {best_test_acc} !', rank=rank)
         wandb.finish()
 
     cleanup()

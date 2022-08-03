@@ -16,8 +16,8 @@ device = torch.device("cuda")
 save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
 state_dict = torch.load(save_path)
 
-pc_model, _ = build_model()
-model = pc_model.to(device)
+pc_model, _ = build_model(device)
+model = pc_model
 
 model.load_state_dict(state_dict)
 model = model.eval()
@@ -33,41 +33,40 @@ elif args.pt_dataset == "ScanObjectNN":
     test_loader = DataLoader(ScanObjectNNSVM(partition='test', num_points=args.num_test_points),
                                 batch_size=args.test_batch_size, shuffle=True)
 
-feats_train = []
-labels_train = []
-for i, (data, label) in enumerate(train_loader):
-    if args.pt_dataset == "ModelNet40":
-        labels = list(map(lambda x: x[0],label.numpy().tolist()))
-    elif args.pt_dataset == "ScanObjectNN":
-        labels = label.numpy().tolist()
-    data = data.to(device)
-    with torch.no_grad():
-        feats = model(data)
-    feats = feats.detach().cpu().numpy()
-    feats_train.extend(feats)
-    labels_train.extend(labels)
+with torch.no_grad():
+    feats_train = []
+    labels_train = []
+    for i, (data, label) in enumerate(train_loader):
+        if args.pt_dataset == "ModelNet40":
+            labels = list(map(lambda x: x[0],label.tolist()))
+        elif args.pt_dataset == "ScanObjectNN":
+            labels = label.tolist()
+        data = data.to(device)
+        # model(data)[1] is the features output by CrossFormer backbone
+        feats = model(data)[1].tolist()
+        feats_train.extend(feats)
+        labels_train.extend(labels)
 
-feats_train = np.array(feats_train)
-labels_train = np.array(labels_train)
-print(feats_train.shape)
+    feats_train = np.array(feats_train)
+    labels_train = np.array(labels_train)
+    print('feats_train.shape:', feats_train.shape)
 
-feats_test = []
-labels_test = []
-for i, (data, label) in enumerate(test_loader):
-    if args.pt_dataset == "ModelNet40":
-        labels = list(map(lambda x: x[0],label.numpy().tolist()))
-    elif args.pt_dataset == "ScanObjectNN":
-        labels = label.numpy().tolist()
-    data = data.to(device)
-    with torch.no_grad():
-        feats = model(data)
-    feats = feats.detach().cpu().numpy()
-    feats_test.extend(feats)
-    labels_test.extend(labels)
+    feats_test = []
+    labels_test = []
+    for i, (data, label) in enumerate(test_loader):
+        if args.pt_dataset == "ModelNet40":
+            labels = list(map(lambda x: x[0],label.tolist()))
+        elif args.pt_dataset == "ScanObjectNN":
+            labels = label.tolist()
+        data = data.to(device)
+        # model(data)[1] is the features output by CrossFormer backbone
+        feats = model(data)[1].tolist()
+        feats_test.extend(feats)
+        labels_test.extend(labels)
 
-feats_test = np.array(feats_test)
-labels_test = np.array(labels_test)
-print(feats_test.shape)
+    feats_test = np.array(feats_test)
+    labels_test = np.array(labels_test)
+    print('feats_test.shape:', feats_test.shape)
 
 # ScanOjbectNN 效果有点差啊，只有57%的准确性
 # Linear SVM parameter C, can be tuned

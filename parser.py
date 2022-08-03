@@ -29,7 +29,7 @@ parser.add_argument('--epochs', type=int, default=300, metavar='N',
                     help='number of episode to train ')
 parser.add_argument('--batch_size', type=int, default=16, metavar='batch_size',
                     help='Size of batch')
-parser.add_argument('--test_batch_size', type=int, default=16, metavar='test_batch_size',
+parser.add_argument('--test_batch_size', type=int, default=160, metavar='test_batch_size',
                     help='Size of test batch')
 parser.add_argument('--num_workers', type=int, default=0, metavar='num_workers',
                     help='number of processes to load data in host memory')
@@ -96,6 +96,7 @@ parser.add_argument('--atten_drop', type=float, default=0.1,
                     help='dropout rate in Attention')
 parser.add_argument('--mlp_drop', type=float, default=0.5,
                     help='dropout rate in MLP')
+parser.add_argument('--layer_idx', nargs='+', type=int, help='Specify the layers whose feature will be extracted')
 
 parser.add_argument('--cmid_weight', type=float, default=1.0,
                     help='weight of loss_cmid')
@@ -144,6 +145,10 @@ parser.add_argument('--n_shot', type=int, default=10,
                         help='Num of samples in one class')
 parser.add_argument('--n_query', type=int, default=20,
                         help='Num of query samples in one class')
+
+# visualization
+parser.add_argument('--category', type=str, default='Airplane', help='select category')
+parser.add_argument('--ballradius', type=int, default=10, help='ballradius')
 
 # wandb settings
 parser.add_argument('--wb_url', type=str, default="http://202.112.113.241:28282", help='wandb server url')

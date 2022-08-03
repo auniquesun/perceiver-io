@@ -348,7 +348,7 @@ class CrossFormer(nn.Module):
         max_dpr=0.1,
         atten_drop=.0,
         mlp_drop=.0,
-        layer_idx=[3,7,11],
+        layer_idx=[],
         num_part_classes=50):
         super().__init__()
 
@@ -384,9 +384,11 @@ class CrossFormer(nn.Module):
                                    nn.BatchNorm1d(64),
                                    nn.LeakyReLU(0.2))
 
-        self.propagation = PointNetFeaturePropagation(in_channel=1152+3, mlp=[mlp_widen_factor*num_latent_channels, 1024])
+        self.num_layer_idx = len(layer_idx)
+        self.propagation = PointNetFeaturePropagation(in_channel=self.num_layer_idx*num_latent_channels+3, \
+                                                    mlp=[mlp_widen_factor*num_latent_channels, 1024])
 
-        self.conv1 = nn.Conv1d(3392, 512, 1)
+        self.conv1 = nn.Conv1d(2*self.num_layer_idx*num_latent_channels+64+1024, 512, 1)
         self.bn1 = nn.BatchNorm1d(512)
         self.dp1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(512, 256, 1)
@@ -417,30 +419,34 @@ class CrossFormer(nn.Module):
         feature_list = self.encoder(group_embs, pos_embs, pts_embs, self.layer_idx)
         # feature_list: [3, batch, dim_model, num_groups]
         feature_list = [self.norm(x).transpose(-1, -2).contiguous() for x in feature_list]
-        # x: [batch, 3*dim_model, num_groups]
-        x = torch.cat((feature_list[0],feature_list[1],feature_list[2]), dim=1)
-        # x_max: [batch, 3*dim_model]
+        if self.num_layer_idx == 3:
+            # x: [batch, 3*dim_model, num_groups]
+            x = torch.cat((feature_list[0],feature_list[1],feature_list[2]), dim=1)
+        if self.num_layer_idx == 4:
+            # x: [batch, 4*dim_model, num_groups]
+            x = torch.cat((feature_list[0],feature_list[1],feature_list[2],feature_list[3]), dim=1)
+        # x_max: [batch, num_layer_idx*dim_model]
         x_max = torch.max(x,2)[0]
-        # x_avg: [batch, 3*dim_model]
+        # x_avg: [batch, num_layer_idx*dim_model]
         x_avg = torch.mean(x,2)
 
-        # x_max_feature: [batch, 3*dim_model, num_points]
+        # x_max_feature: [batch, num_layer_idx*dim_model, num_points]
         x_max_feature = x_max.view(B, -1).unsqueeze(-1).repeat(1, 1, N)
-        # x_avg_feature: [batch, 3*dim_model, num_points]
+        # x_avg_feature: [batch, num_layer_idx*dim_model, num_points]
         x_avg_feature = x_avg.view(B, -1).unsqueeze(-1).repeat(1, 1, N)
         # cls_label_one_hot: [batch, num_classes, 1]
         cls_label_one_hot = cls_label.view(B, 16, 1)
         # cls_label_feature: [batch, 64, num_points]
         cls_label_feature = self.label_conv(cls_label_one_hot).repeat(1, 1, N)
-        # x_global_feature: [batch, 3*dim_model + 3*dim_model + 64, num_points]
-        x_global_feature = torch.cat((x_max_feature, x_avg_feature, cls_label_feature), 1) #1152*2 + 64
+        # x_global_feature: [batch, num_layer_idx*dim_model + num_layer_idx*dim_model + 64, num_points]
+        x_global_feature = torch.cat((x_max_feature, x_avg_feature, cls_label_feature), 1)
         # pts.transpose(-1, -2) -> [batch, 3, num_points]
         # center.transpose(-1, -2)  -> [batch, 3, num_groups]
         # x: [batch, 3*dim_model, num_groups]
         # f_level_0: [batch, 1024, num_points]
         f_level_0 = self.propagation(pts.transpose(-1, -2), center.transpose(-1, -2), pts.transpose(-1, -2), x)
 
-        # x: [batch, 3392, num_points]
+        # x: [batch, 2*num_layer_idx*num_latent_channels+64+1024, num_points]
         x = torch.cat((f_level_0,x_global_feature), 1)
         # x: [batch, 512, num_points]
         x = self.relu(self.bn1(self.conv1(x)))

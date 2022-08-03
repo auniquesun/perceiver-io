@@ -1,13 +1,8 @@
-import math
-
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import torch
-from einops import rearrange, repeat
-from torch import Tensor
+from torch import nn
 
-from .utils import divide_patches, Group2Emb
 
 from perceiver.model.core import (
     ClassificationDecoderConfig,
@@ -35,24 +30,31 @@ class PointCloudInputAdapter(InputAdapter):
         # spatial_shape: [2048],   num_pointcloud_channels: [3]
         self.num_points, self.num_point_channels = pointcloud_shape
 
-        self.num_groups = num_groups
-        self.group_size = group_size
-
-        self.group_emb = Group2Emb(num_input_channels)
+        # self.num_groups = num_groups
+        # self.group_size = group_size
+        # self.group_emb = Group2Emb(num_input_channels)
+        self.point_mlp = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Linear(64, num_input_channels)
+        )
 
     def forward(self, x):
         # [batch_size, 2048, 3]
         b, n, c = x.shape
 
-        if (n, c) != (self.num_points, self.num_point_channels):
-            raise ValueError(f"Input pointcloud shape {(n, c)} different from required shape {(self.num_points, self.num_point_channels)}")
+        # if (n, c) != (self.num_points, self.num_point_channels):
+            # raise ValueError(f"Input pointcloud shape {(n, c)} different from required shape {(self.num_points, self.num_point_channels)}")
 
-        # neighbors: [batch, num_groups, group_size, 3]
-        neighbors, centers = divide_patches(x, self.num_groups, self.group_size)
-        # group_emb: [batch, num_groups, dim_model]
-        group_emb = self.group_emb(neighbors)
+        # # neighbors: [batch, num_groups, group_size, 3]
+        # neighbors, centers = divide_patches(x, self.num_groups, self.group_size)
+        # # group_emb: [batch, num_groups, dim_model]
+        # group_emb = self.group_emb(neighbors)
 
-        return group_emb
+        point_feats = self.point_mlp(x)
+
+        return point_feats
 
 
 class PointCloudClassifier(PerceiverIO):

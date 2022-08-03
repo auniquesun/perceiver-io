@@ -72,7 +72,7 @@ def main(rank, logger_name, log_path, log_file):
     seg_start_index = train_loader.dataset.seg_start_index
 
     model = build_ft_partseg(rank=rank)
-    model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=False)
+    model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # ----- load pretrained model
     # assert args.resume, 'Finetuning Perceiver_partseg requires pretrained model weights'
@@ -127,7 +127,6 @@ def main(rank, logger_name, log_path, log_file):
 
     criterion = CrossEntropyLoss(label_smoothing=0.2)
 
-    train_best_acc = .0
     test_best_mean_part_iou = .0
     for epoch in range(args.epochs):
         # ------ Train
@@ -167,7 +166,7 @@ def main(rank, logger_name, log_path, log_file):
             points_seg_acc.update(pos, batch_size*num_points-pos, batch_size*num_points)
 
             loss.backward()
-            # clip grad to prevent exploding
+            # clip grad to prevent exploding, following Point-MAE and Point-Bert
             torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), 10, norm_type=2)
             optimizer.step()
 
@@ -184,14 +183,12 @@ def main(rank, logger_name, log_path, log_file):
             logger.write(outstr, rank=rank)
 
             if rank == 0:
-                if train_acc > train_best_acc:
-                    train_best_acc = train_acc
-
                 if test_mean_part_iou > test_best_mean_part_iou:
                     test_best_mean_part_iou = test_mean_part_iou
-                    logger.write(f'Find new highest Mean IoU score: {test_best_mean_part_iou} !', rank=rank)
+                    logger.write(f'Find new highest Mean Part IoU: {test_best_mean_part_iou} !', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_state = {'epoch': epoch, # start from 0
+                        'test_loss': test_loss, 
                         'test_mean_part_iou': test_mean_part_iou,
                         'test_mean_category_iou': test_mean_category_iou, 
                         'test_mean_part_acc': test_mean_part_acc,
@@ -207,7 +204,7 @@ def main(rank, logger_name, log_path, log_file):
                 else:
                     wandb_log['learning_rate'] = lr_scheduler.get_last_lr()[0]
                 wandb_log["train_loss"] = train_loss
-                wandb_log["train_acc"] = train_acc
+                wandb_log["train_point_level_acc"] = train_acc
                 wandb_log["test_point_level_acc"] = test_point_level_acc
                 wandb_log["test_mean_part_acc"] = test_mean_part_acc
                 wandb_log["test_mean_part_iou"] = test_mean_part_iou
@@ -219,7 +216,7 @@ def main(rank, logger_name, log_path, log_file):
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final highest Mean IoU score: {test_best_mean_part_iou} !', rank=rank)
+        logger.write(f'Final highest Mean Part IoU: {test_best_mean_part_iou} !', rank=rank)
         logger.write('End of DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
         wandb.finish()
     cleanup()
@@ -254,7 +251,6 @@ def test(rank, model, test_loader, criterion):
         test_loss.update(loss, batch_size)
 
         # NOTE: the following loop ensures the predictions happen on the target object category
-        tmp = partseg_label.cpu().numpy()   # copy `partseg_label` to cpu because `tmp[i, 0]` will serve as an index
         refined_pred = torch.zeros(batch_size, num_points, dtype=torch.int32, device=f'cuda:{rank}')
         for i in range(batch_size):
             # partseg_label[i, 0] is a tensor, it should be converted to an integer to serve as an index
@@ -327,6 +323,6 @@ if __name__ == "__main__":
             # torch.cuda.manual_seed() is insufficient to get determinism for all GPUs
             mp.spawn(main, args=(logger_name, log_path, log_file), nprocs=args.world_size)
         else:
-            logger.write('Only one GPU is available, the process will be much slower', rank=0)
+            logger.write('Only one GPU is available, the process will be much slower! Exit', rank=0)
     else:
         logger.write('CUDA is unavailable! Exit', rank=0)

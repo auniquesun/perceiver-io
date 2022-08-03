@@ -308,7 +308,7 @@ if '__main__' == __name__:
             # torch.cuda.manual_seed() is insufficient to get determinism for all GPUs
             mp.spawn(main, args=(logger_name, log_path, log_file), nprocs=args.world_size)
         else:
-            logger.write('Only one GPU is available, the process will be much slower', rank=0)
+            logger.write('Only one GPU is available, the process will be much slower. Exit', rank=0)
     else:
         logger.write('CUDA is unavailable! Exit', rank=0)
         
