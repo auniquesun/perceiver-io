@@ -24,33 +24,27 @@ class PointCloudEncoderConfig(EncoderConfig):
 
 
 class PointCloudInputAdapter(InputAdapter):
-    def __init__(self, pointcloud_shape: Tuple[int, ...], num_input_channels: int, num_groups: int, group_size: int):
+    def __init__(self, pointcloud_shape: Tuple[int, ...], num_input_channels: int):
         super().__init__(num_input_channels=num_input_channels)
 
-        # spatial_shape: [2048],   num_pointcloud_channels: [3]
-        self.num_points, self.num_point_channels = pointcloud_shape
+        _, self.point_channels = pointcloud_shape
 
-        # self.num_groups = num_groups
-        # self.group_size = group_size
-        # self.group_emb = Group2Emb(num_input_channels)
         self.point_mlp = nn.Sequential(
-            nn.Linear(3, 64),
+            nn.Linear(self.point_channels, 64),
             nn.LayerNorm(64),
             nn.ReLU(),
             nn.Linear(64, num_input_channels)
         )
 
     def forward(self, x):
-        # [batch_size, 2048, 3]
-        b, n, c = x.shape
-
-        # if (n, c) != (self.num_points, self.num_point_channels):
-            # raise ValueError(f"Input pointcloud shape {(n, c)} different from required shape {(self.num_points, self.num_point_channels)}")
-
-        # # neighbors: [batch, num_groups, group_size, 3]
-        # neighbors, centers = divide_patches(x, self.num_groups, self.group_size)
-        # # group_emb: [batch, num_groups, dim_model]
-        # group_emb = self.group_emb(neighbors)
+        '''
+        Args
+            x: [batch_size, num_points, point_channels]
+        Return
+            point_feats: [batch_size, num_points, num_input_channels]
+        '''
+        # if (n, c) != (self.num_points, self.point_channels):
+            # raise ValueError(f"Input pointcloud shape {(n, c)} different from required shape {(self.num_points, self.point_channels)}")
 
         point_feats = self.point_mlp(x)
 

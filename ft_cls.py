@@ -11,7 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from datasets.data import ModelNet40SVM, ScanObjectNNSVM
 
-from utils import build_finetune_model
+from utils import build_ft_cls
 
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, CosineAnnealingWarmRestarts, StepLR, ReduceLROnPlateau
@@ -39,6 +39,8 @@ def cleanup():
 
 def main(rank, logger_name, log_path, log_file):
     if rank == 0:
+        os.environ["WANDB_BASE_URL"] = args.wb_url
+        wandb.login(key=args.wb_key)
         wandb.init(project=args.proj_name, name=args.exp_name)
 
     # NOTE: only write logs of the results obtained by
@@ -47,7 +49,7 @@ def main(rank, logger_name, log_path, log_file):
 
     setup(rank)
 
-    if 'ModelNet' in args.ft_dataset:
+    if 'ModelNet40' in args.ft_dataset:
         train_set = ModelNet40SVM(partition='train', num_points=args.num_ft_points)
         test_set = ModelNet40SVM(partition='test', num_points=args.num_ft_points)
     elif 'ScanObjectNN' in args.ft_dataset:
@@ -69,7 +71,7 @@ def main(rank, logger_name, log_path, log_file):
         sampler=train_sampler,
         batch_size=samples_per_gpu,
         shuffle=False,
-        num_workers=0,
+        num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False)
     test_loader = DataLoader(
@@ -77,11 +79,11 @@ def main(rank, logger_name, log_path, log_file):
         sampler=test_sampler,
         batch_size=test_samples_per_gpu,
         shuffle=False,
-        num_workers=0,
+        num_workers=args.num_workers,
         pin_memory=True,
         drop_last=False)
 
-    model = build_finetune_model(rank=rank)
+    model = build_ft_cls(rank=rank)
     model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=False)
 
     # ----- load pretrained model
@@ -112,7 +114,6 @@ def main(rank, logger_name, log_path, log_file):
     
     logger.write(f'Using {args.optim} optimizer ...', rank=rank)
 
-    # 这也是要调优的
     if args.scheduler == 'cos':
         lr_scheduler = CosineAnnealingLR(
             optimizer, 
@@ -139,12 +140,14 @@ def main(rank, logger_name, log_path, log_file):
             optimizer, 
             step_size=args.step_size)
 
-    criterion = CrossEntropyLoss()
+    # PyTorch 1.11.0 -> `label_smoothing` in CrossEntropyLoss
+    #   https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
+    criterion = CrossEntropyLoss(label_smoothing=0.2)
     scaler = GradScaler()
     logger.write('Start DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
 
-    ft_train_best_acc = .0
     ft_test_best_acc = .0
+    best_epoch = 0
     for epoch in range(args.epochs):
         # ------ Train
         model_ddp.train()
@@ -156,17 +159,17 @@ def main(rank, logger_name, log_path, log_file):
         train_loss = AverageMeter()
         acc_meter = AccuracyMeter()
 
-        for i, (data,label) in enumerate(train_loader):
+        for i, (points,label) in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
             with autocast():
-                # data.shape: [B, N, C]
-                batch_size = data.shape[0]
-                data = data.to(rank)
+                # points.shape: [B, N, C]
+                batch_size = points.shape[0]
+                points = points.to(rank)
                 label = label.to(rank)
 
                 # NOTE: here `loss` has already been averaged by `batch_size`
-                pred_classes = model_ddp(data)
+                pred_classes = model_ddp(points)
                 # ------ ref: https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
                 #           The `pred_classes` is expected to contain `raw`, `unnormalized` scores for each class
                 #           label.squeeze() is a `batch_size`-Dimension class index tensor
@@ -176,7 +179,7 @@ def main(rank, logger_name, log_path, log_file):
             scaler.step(optimizer)
             scaler.update()
             
-            train_loss.update(loss.item(), n=batch_size)
+            train_loss.update(loss, n=batch_size)
             # x.argmax: low bound begins with 0
             pred_idx = pred_classes.argmax(dim=1)
             pos = acc_meter.pos_count(pred_idx, label.squeeze())
@@ -184,40 +187,25 @@ def main(rank, logger_name, log_path, log_file):
 
             if i % args.print_freq == 0:
                 logger.write(f'Epoch: {epoch}/{args.epochs}, Batch: {i}/{len(train_loader)}, '
-                             f'Loss: {loss.item()}, Acc: {pos/batch_size}', rank=rank)
-
-        # num_pos = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(num_pos, acc_meter.num_pos)
-        # num_pos = np.sum(num_pos)
-
-        # total = [.0 for _ in range(args.world_size)]
-        # dist.all_gather_object(total, acc_meter.total)
-        # total = np.sum(total)
+                             f'Loss: {loss.item()}, Acc: {pos.item()/batch_size}', rank=rank)
 
         # ------ Test
         with torch.no_grad():
-            ft_train_acc = acc_meter.num_pos / acc_meter.total
+            ft_train_acc = acc_meter.num_pos.item() / acc_meter.total
 
             logger.write('Start testing on the %s test set ...' % args.ft_dataset, rank=rank)
             
-            ft_test_loss, ft_test_acc = test(test_loader, model_ddp, criterion, rank)
+            ft_test_loss, ft_test_acc = test(rank, test_loader, model_ddp, criterion)
 
             logger.write(f'Test on {args.ft_dataset}, Epoch: {epoch}/{args.epochs}, Acc: {ft_test_acc}, Loss: {ft_test_loss}', rank=rank)
 
             if rank == 0:
-                if ft_train_acc > ft_train_best_acc:
-                    ft_train_best_acc = ft_train_acc
-
                 if ft_test_acc > ft_test_best_acc:
                     ft_test_best_acc = ft_test_acc
-                    logger.write(f'Finding new highest test score: {ft_test_best_acc} !', rank=rank)
+                    best_epoch = epoch
+                    logger.write(f'Finding new best test score: {ft_test_best_acc} at epoch {best_epoch}!', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'model_best.pth')
-                    torch.save(model_ddp.module.state_dict(), save_path)
-
-                if epoch % args.save_freq == 0:
-                    logger.write(f'Saving {epoch}th model ...', rank=rank)
-                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_epoch{epoch}.pth')
                     torch.save(model_ddp.module.state_dict(), save_path)
 
                 wandb_log = dict()
@@ -227,9 +215,8 @@ def main(rank, logger_name, log_path, log_file):
                     wandb_log['learning_rate'] = lr_scheduler.get_lr()[0]
                 else:
                     wandb_log['learning_rate'] = lr_scheduler.get_last_lr()[0]
-                wandb_log['ft_train_loss'] = train_loss.avg
+                wandb_log['ft_train_loss'] = train_loss.avg.item()
                 wandb_log['ft_train_acc'] = ft_train_acc
-                wandb_log['ft_train_best_acc'] = ft_train_best_acc
                 wandb_log['ft_test_loss'] = ft_test_loss
                 wandb_log['ft_test_acc'] = ft_test_acc
                 wandb_log['ft_test_best_acc'] = ft_test_best_acc
@@ -239,50 +226,35 @@ def main(rank, logger_name, log_path, log_file):
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final highest finetuning score: {ft_test_best_acc} !', rank=rank)
-        logger.write('Saving the last model ...', rank=rank)
-        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', f'model_last.pth')
-        torch.save(model_ddp.module.state_dict(), save_path)
+        logger.write(f'Final best finetuning score: {ft_test_best_acc} at epoch {best_epoch}!', rank=rank)
         logger.write('End of DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
         wandb.finish()
 
     cleanup()
 
 
-def test(test_loader, model_ddp, criterion, rank):
+def test(rank, test_loader, model_ddp, criterion):
     model_ddp.eval()
 
     test_loss = AverageMeter()
     acc_meter = AccuracyMeter()  
-    for (data, label) in test_loader:
-        batch_size = data.shape[0]
+    for (points, label) in test_loader:
+        batch_size = points.shape[0]
 
-        data = data.to(rank)
+        points = points.to(rank)
         label = label.to(rank)
 
         # pred_classes: [batch, num_classes]
-        pred_classes = model_ddp(data)
+        pred_classes = model_ddp(points)
         loss = criterion(pred_classes, label.squeeze())
-        test_loss.update(loss.item(), n=batch_size)
+        test_loss.update(loss, n=batch_size)
         # pred_idx: a batch-Dimension tensor
         pred_idx = pred_classes.argmax(dim=1)
         pos = acc_meter.pos_count(pred_idx, label.squeeze())
         acc_meter.update(pos, batch_size-pos, n=batch_size)
     
-    # loss = [.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(loss, test_loss.avg)
-    # ft_test_loss = np.mean(loss)
-    ft_test_loss = test_loss.avg
-
-    # num_pos = [.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(num_pos, acc_meter.num_pos)
-    # num_pos = np.sum(num_pos)
-
-    # total = [.0 for _ in range(args.world_size)]
-    # dist.all_gather_object(total, acc_meter.total)
-    # total = np.sum(total)
-    # ft_test_acc = num_pos / total
-    ft_test_acc = acc_meter.num_pos / acc_meter.total
+    ft_test_loss = test_loss.avg.item()
+    ft_test_acc = acc_meter.num_pos.item() / acc_meter.total
 
     return ft_test_loss, ft_test_acc
 
@@ -308,7 +280,7 @@ if '__main__' == __name__:
             # torch.cuda.manual_seed() is insufficient to get determinism for all GPUs
             mp.spawn(main, args=(logger_name, log_path, log_file), nprocs=args.world_size)
         else:
-            logger.write('Only one GPU is available, the process will be much slower. Exit', rank=0)
+            logger.write('Only one GPU is available, the process will be much slower! Exit', rank=0)
     else:
         logger.write('CUDA is unavailable! Exit', rank=0)
         

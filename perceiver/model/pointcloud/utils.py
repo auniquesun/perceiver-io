@@ -6,72 +6,80 @@ import torch.nn.functional as F
 def divide_patches(points, num_groups, group_size):
     '''
         Args:
-            points: [batch_size, num_points, 3]
+            points: [batch_size, num_points, point_channels], here `point_channels` can be > 3
         Return:
-            centers: [batch_size, num_groups, 3]
-            neighbors: [batch_size, num_groups, group_size, 3]
+            centers: [batch_size, num_groups, point_channels]
+            neighbors: [batch_size, num_groups, group_size, point_channels]
     '''
-    batch_size, num_points, _ = points.shape
-    # fps the centers out
-    # center: [batch_size, num_groups, 3]
-    center = fps(points, num_groups)
-    # knn to get the neighborhood
-    # idx: [batch_size, num_groups, num_neighbor], NOTE num_neighbor == group_size
-    idx = knn_point(group_size, points, center)
+    batch_size, num_points, point_channels = points.shape
+    # centers: [batch_size, num_groups, point_channels]
+    centers = fps(points, num_groups)
+    # knn to get the neighborhood of each center
+    # idx: [batch_size, num_groups, group_size]
+    neighbor_idx = knn_point(group_size, points[:, :, :3], centers[:, :, :3])
     
-    # idx_base: [batch_size, 1, 1] <- torch.arange(0, batch_size, device=points.device).view(-1, 1, 1) * num_points
-    idx_base = torch.arange(0, batch_size, device=points.device).view(-1, 1, 1) * num_points
-    # idx: [batch_size, num_groups, num_neighbor]
-    idx = idx + idx_base
-    # idx: [batch_size * num_groups * num_neighbor]
-    idx = idx.view(-1)
-    # [batch_size * num_points, 3] <- points.view(batch_size * num_points, -1)
-    # neighbors: [batch_size * num_groups * num_neighbor, 3]
-    neighbors = points.reshape(batch_size * num_points, -1)[idx, :]
-    # neighbors: [batch_size, num_groups, num_neighbor, 3]
-    neighbors = neighbors.reshape(batch_size, num_groups, group_size, 3)
-    # normalize
-    # [batch_size, num_groups, 1, 3] <- center.unsqueeze(2)
-    # neighbors: [batch_size, num_groups, num_neighbor, 3]
-    neighbors = neighbors - center.unsqueeze(2)
+    # neighbor_idx_base: [batch_size, 1, 1]
+    neighbor_idx_base = torch.arange(0, batch_size, device=points.device).view(-1, 1, 1) * num_points
+    # neighbor_idx: [batch_size, num_groups, group_size]
+    neighbor_idx = neighbor_idx + neighbor_idx_base
+    # neighbor_idx: [batch_size * num_groups * group_size]
+    neighbor_idx = neighbor_idx.view(-1)
 
-    return neighbors, center
+    # points.reshape(batch_size * num_points, -1) -> [batch_size * num_points, point_channels]
+    # neighbors: [batch_size * num_groups * group_size, point_channels]
+    neighbors = points.reshape(batch_size * num_points, -1)[neighbor_idx, :]
+    # neighbors: [batch_size, num_groups, group_size, point_channels]
+    neighbors = neighbors.reshape(batch_size, num_groups, group_size, point_channels)
+    # normalize only point coordinates, which are first 3 dimensions
+    #   centers.unsqueeze(2): [batch_size, num_groups, 1, point_channels]
+    #   neighbors: [batch_size, num_groups, group_size, point_channels]
+    neighbors[:, :, :3] = neighbors[:, :, :3] - centers.unsqueeze(2)[:, :, :3]
+
+    return neighbors, centers
 
 
-def fps(data, number):
+def fps(pts, number):
     '''
         Args:
-            data: [batch_size, num_points, 3]
+            pts: [batch_size, num_points, point_channels]
             number: the number of points FPS will return
         Return:
-            fps_point: [batch_size, num_groups, 3]
+            fps_point: [batch_size, num_groups, point_channels]
     '''
     
-    fps_idx = farthest_point_sample(data, number)
-    fps_data = index_points(data, fps_idx)
+    fps_idx = farthest_point_sample(pts, number)
+    fps_pts = index_points(pts, fps_idx)
 
-    return fps_data
+    return fps_pts
 
 
-def farthest_point_sample(xyz, npoint):
+def farthest_point_sample(pts, npoint):
     """
         Args:
-            xyz: pointcloud data, [B, N, 3]
+            pts: pointcloud data, [B, N, C]. Here `C` is not necessary 3, it can be 6.
             npoint: number of samples
         Return:
             centroids: sampled pointcloud index, [B, npoint]
     """
-    device = xyz.device
-    B, N, C = xyz.shape
-    centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
-    distance = torch.ones(B, N).to(device) * 1e10
-    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
-    batch_indices = torch.arange(B, dtype=torch.long).to(device)
+    device = pts.device
+    B, N, _ = pts.shape
+    # centroids: [B, npoint]
+    centroids = torch.zeros(B, npoint, dtype=torch.long, device=device)
+    # distance: [B, N]
+    distance = torch.ones(B, N, device=device) * 1e10   # don't overlook `* 1e10`
+    # farthest: [B]
+    farthest = torch.randint(0, N, (B,), dtype=torch.long, device=device)
+    # batch_indices: [B]
+    batch_indices = torch.arange(B, dtype=torch.long, device=device)
     for i in range(npoint):
         centroids[:, i] = farthest
-        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
-        dist = torch.sum((xyz - centroid) ** 2, -1)
+        # centroid: [B, 1, 3]
+        centroid = pts[batch_indices, farthest, :3].view(B, 1, 3)
+        # dist: [B, N]
+        dist = torch.sum((pts[:,:,:3] - centroid) ** 2, -1)
+        # distance: [B, N]
         distance = torch.min(distance, dist)
+        # farthest: [B]
         farthest = torch.max(distance, -1)[1]
 
     return centroids
@@ -85,13 +93,12 @@ def index_points(points, idx):
         Return:
             new_points:, indexed points data, [B, S, C]
     """
-    device = points.device
     B = points.shape[0]
     view_shape = list(idx.shape)
     view_shape[1:] = [1] * (len(view_shape) - 1)
     repeat_shape = list(idx.shape)
     repeat_shape[0] = 1
-    batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
+    batch_indices = torch.arange(B, dtype=torch.long, device=points.device).view(view_shape).repeat(repeat_shape)
     new_points = points[batch_indices, idx, :]
 
     return new_points
@@ -140,11 +147,12 @@ class Group2Emb(nn.Module):
         reference: point-bert，
             ------- 是否就是论文里讲的 light-weight PointNet?
     '''
-    def __init__(self, dim_model):
+    def __init__(self, dim_model, point_channels=3):
         super().__init__()
         self.dim_model = dim_model
+        self.point_channels = point_channels
         self.first_conv = nn.Sequential(
-            nn.Conv1d(3, 64, 1),
+            nn.Conv1d(point_channels, 64, 1),
             nn.BatchNorm1d(64),
             nn.ReLU(inplace=True),
             nn.Conv1d(64, 128, 1)
@@ -160,18 +168,18 @@ class Group2Emb(nn.Module):
     def forward(self, point_groups):
         '''
             Args:
-                point_groups : [batch, num_groups, group_size, 3]
+                point_groups : [batch, num_groups, group_size, point_channels]
             Return:
                 groups_emb : [batch, num_groups, dim_model]
         '''
         bs, g, n , _ = point_groups.shape
-        point_groups = point_groups.reshape(bs * g, n, 3)
-        # feature: [batch*num_groups, 256, group_size]
+        point_groups = point_groups.reshape(bs * g, n, self.point_channels)
+        # feature: [batch*num_groups, 128, group_size]
         feature = self.first_conv(point_groups.transpose(2,1))
-        # feature_global: [batch*num_groups, 256, 1]
+        # feature_global: [batch*num_groups, 128, 1]
         # ------ 相当于group内部最大池化
         feature_global = torch.max(feature, dim=2, keepdim=True)[0]
-        # feature: [batch*num_groups, 512, group_size]
+        # feature: [batch*num_groups, 256, group_size]
         # ------ 连接 `group整体特征` 和 `group内部点特征`
         feature = torch.cat([feature_global.expand(-1,-1,n), feature], dim=1)
         # feature: [batch*num_groups, dim_model, group_size]

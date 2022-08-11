@@ -146,6 +146,7 @@ def main(rank, logger_name, log_path, log_file):
     scaler = GradScaler()
     criterion = NTXentLoss(temperature = 0.1).to(rank)
     best_test_acc = .0
+    best_epoch = 0
     for epoch in range(args.epochs):
         # ------ Train
         pc_model_ddp.train()
@@ -208,12 +209,12 @@ def main(rank, logger_name, log_path, log_file):
 
             for i, (data, label) in enumerate(train_val_loader):
                 if args.pt_dataset == "ModelNet40":
-                    labels = list(map(lambda x: x[0],label.numpy().tolist()))
+                    labels = list(map(lambda x: x[0],label.tolist()))
                 elif args.pt_dataset == "ScanObjectNN":
-                    labels = label.numpy().tolist()
+                    labels = label.tolist()
                 data = data.to(rank)
                 feats = pc_model_ddp(data)[1]
-                feats = feats.detach().cpu().numpy()
+                feats = feats.tolist()
                 train_feats.extend(feats)
                 train_labels.extend(labels)
 
@@ -233,12 +234,12 @@ def main(rank, logger_name, log_path, log_file):
 
             for i, (data, label) in enumerate(test_val_loader):
                 if args.pt_dataset == "ModelNet40":
-                    labels = list(map(lambda x: x[0],label.numpy().tolist()))
+                    labels = list(map(lambda x: x[0],label.tolist()))
                 elif args.pt_dataset == "ScanObjectNN":
-                    labels = label.numpy().tolist()
+                    labels = label.tolist()
                 data = data.to(rank)
                 feats = pc_model_ddp(data)[1]
-                feats = feats.detach().cpu().numpy()
+                feats = feats.tolist()
                 test_feats.extend(feats)
                 test_labels.extend(labels)
 
@@ -253,7 +254,8 @@ def main(rank, logger_name, log_path, log_file):
 
                 if test_acc > best_test_acc:
                     best_test_acc = test_acc
-                    logger.write(f'Finding new best linear SVM score: {best_test_acc} !', rank=rank)
+                    best_epoch = epoch
+                    logger.write(f'Finding new best linear SVM score: {best_test_acc} at epoch {best_epoch}!', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
                     torch.save(pc_model_ddp.module.state_dict(), save_path)
@@ -278,7 +280,8 @@ def main(rank, logger_name, log_path, log_file):
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final best linear SVM score: {best_test_acc} !', rank=rank)
+        logger.write(f'Final best svm score: {best_test_acc} at epoch {best_epoch}!', rank=rank)
+        logger.write(f'Final best linear SVM score: {best_test_acc} at epoch {best_epoch}!', rank=rank)
         wandb.finish()
 
     cleanup()

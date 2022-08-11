@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 from torch.utils.data import Dataset
 
+
 def download_shapenetpart():
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -15,6 +16,7 @@ def download_shapenetpart():
         os.system('wget %s --no-check-certificate; unzip %s' % (www, zipfile))
         os.system('mv %s %s' % ('hdf5_data', os.path.join(DATA_DIR, 'shapenet_part_seg_hdf5_data')))
         os.system('rm %s' % (zipfile))
+
 
 def load_data_partseg(partition):
     # download_shapenetpart()
@@ -41,6 +43,7 @@ def load_data_partseg(partition):
     all_label = np.concatenate(all_label, axis=0)
     all_seg = np.concatenate(all_seg, axis=0)
     return all_data, all_label, all_seg
+
 
 def translate_pointcloud(pointcloud):
     xyz1 = np.random.uniform(low=2./3., high=3./2., size=[3])
@@ -74,7 +77,6 @@ class ShapeNetPart(Dataset):
         self.num_points = num_points
         self.partition = partition        
         self.class_choice = class_choice
-        # self.partseg_colors = load_color_partseg()
         
         if self.class_choice != None:
             id_choice = self.cat2id[self.class_choice]

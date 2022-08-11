@@ -66,6 +66,8 @@ parser.add_argument('--num_ft_points', type=int, default=1024,
                     help='Number of points when finetuning')
 parser.add_argument('--num_test_points', type=int, default=1024,
                     help='Number of points when svm test')
+parser.add_argument('--point_channels', type=int, default=3,
+                    help='the dimension of the feature of a point')
 
 # --------- Model specifics
 parser.add_argument('--num_groups', type=int, default=128,

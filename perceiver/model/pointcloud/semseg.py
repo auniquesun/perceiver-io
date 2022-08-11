@@ -7,7 +7,7 @@ from fairscale.nn import checkpoint_wrapper
 
 from timm.models.layers import DropPath
 
-from perceiver.model.pointcloud.utils import Sequential, divide_patches, Group2Emb, PointNetFeaturePropagation
+from perceiver.model.pointcloud.utils import divide_patches, Sequential, Group2Emb, PointNetFeaturePropagation
 
 
 class MultiHeadAttention(nn.Module):
@@ -334,9 +334,10 @@ class Encoder(nn.Module):
         return layer_feats
 
 
-class CrossFormer_partseg(nn.Module):
+class CrossFormer_semseg(nn.Module):
     def __init__(self, 
         input_adapter = None,
+        point_channels=6,
         num_latents=128,
         num_latent_channels=384,
         group_size=32,
@@ -349,16 +350,16 @@ class CrossFormer_partseg(nn.Module):
         atten_drop=.0,
         mlp_drop=.0,
         layer_idx=[],
-        num_part_classes=50):
+        num_obj_classes=13):
         super().__init__()
 
         self.num_groups = num_latents
         self.group_size = group_size
-
-        self.group2emb = Group2Emb(num_latent_channels)
+        # for semantic segmentation, point_channels=6, that has x,y,z,r,g,b
+        self.group2emb = Group2Emb(num_latent_channels, point_channels=point_channels)
 
         self.position_emb = nn.Sequential(
-            nn.Linear(3, 128),
+            nn.Linear(point_channels, 128),
             nn.GELU(),
             nn.Linear(128, num_latent_channels))
 
@@ -388,32 +389,32 @@ class CrossFormer_partseg(nn.Module):
         self.propagation = PointNetFeaturePropagation(in_channel=self.num_layer_idx*num_latent_channels+3, \
                                                     mlp=[mlp_widen_factor*num_latent_channels, 1024])
 
-        self.conv1 = nn.Conv1d(2*self.num_layer_idx*num_latent_channels+64+1024, 512, 1)
+        self.conv1 = nn.Conv1d(2*self.num_layer_idx*num_latent_channels+1024, 512, 1)
         self.bn1 = nn.BatchNorm1d(512)
         self.dp1 = nn.Dropout(0.5)
         self.conv2 = nn.Conv1d(512, 256, 1)
         self.bn2 = nn.BatchNorm1d(256)
-        self.conv3 = nn.Conv1d(256, num_part_classes, 1)
+        self.conv3 = nn.Conv1d(256, num_obj_classes, 1)
         self.relu = nn.ReLU()
 
-    def forward(self, pts, cls_label):
+    def forward(self, pts):
         '''
             Args:
-                pts: [batch, num_points, 3]
-                cls_label: [batch, num_obj_classes]
+                pts: [batch, num_points, point_channels=6]
             Return:
-                partseg_pred: [batch, num_points, num_part_classes]
+                sem_pred: [batch, num_points, num_obj_classes]
         '''
         B, N, _ = pts.shape
         # encode each input point -> pts_embs: [batch, num_points, num_latent_channels]
         pts_embs = self.input_adapter(pts)
 
-        # neighborhood: [batch, num_groups, group_size, 3]    center: [batch, num_groups, 3]
-        neighborhood, center = divide_patches(pts, self.num_groups, self.group_size)
+        # ------ `divide_patches` uses FPS to downsample a point cloud
+        # neighbors: [batch, num_groups, group_size, point_channels]    centers: [batch, num_groups, point_channels]
+        neighbors, centers = divide_patches(pts, self.num_groups, self.group_size)
         # group_embs: [batch, num_groups, num_latent_channels]
-        group_embs = self.group2emb(neighborhood)
+        group_embs = self.group2emb(neighbors)
         # pos_embs: [batch, num_groups, num_latent_channels]
-        pos_embs = self.position_emb(center)
+        pos_embs = self.position_emb(centers)
 
         # feature_list: [3, batch, num_groups, dim_model]
         feature_list = self.encoder(group_embs, pos_embs, pts_embs, self.layer_idx)
@@ -434,29 +435,26 @@ class CrossFormer_partseg(nn.Module):
         x_max_feature = x_max.view(B, -1).unsqueeze(-1).repeat(1, 1, N)
         # x_avg_feature: [batch, num_layer_idx*dim_model, num_points]
         x_avg_feature = x_avg.view(B, -1).unsqueeze(-1).repeat(1, 1, N)
-        # cls_label_one_hot: [batch, num_classes, 1]
-        cls_label_one_hot = cls_label.view(B, 16, 1)
-        # cls_label_feature: [batch, 64, num_points]
-        cls_label_feature = self.label_conv(cls_label_one_hot).repeat(1, 1, N)
-        # x_global_feature: [batch, num_layer_idx*dim_model + num_layer_idx*dim_model + 64, num_points]
-        x_global_feature = torch.cat((x_max_feature, x_avg_feature, cls_label_feature), 1)
-        # pts.transpose(-1, -2) -> [batch, 3, num_points]
-        # center.transpose(-1, -2)  -> [batch, 3, num_groups]
+        # x_global_feature: [batch, num_layer_idx*dim_model + num_layer_idx*dim_model, num_points]
+        x_global_feature = torch.cat((x_max_feature, x_avg_feature), 1)
+        # ------ when UpSampling using propagation, only pass the `point coordinates` into the function, without color information
+        # pts[:, :, :3].transpose(-1, -2) -> [batch, 3, num_points]
+        # centers[:, :, :3].transpose(-1, -2)  -> [batch, 3, num_groups]
         # x: [batch, 3*dim_model, num_groups]
         # f_level_0: [batch, 1024, num_points]
-        f_level_0 = self.propagation(pts.transpose(-1, -2), center.transpose(-1, -2), pts.transpose(-1, -2), x)
+        f_level_0 = self.propagation(pts[:, :, :3].transpose(-1, -2), centers[:, :, :3].transpose(-1, -2), pts[:, :, :3].transpose(-1, -2), x)
 
-        # x: [batch, 2*num_layer_idx*num_latent_channels+64+1024, num_points]
-        x = torch.cat((f_level_0,x_global_feature), 1)
+        # x: [batch, 2*num_layer_idx*num_latent_channels+1024, num_points]
+        x = torch.cat((f_level_0, x_global_feature), 1)
         # x: [batch, 512, num_points]
         x = self.relu(self.bn1(self.conv1(x)))
         # x: [batch, 512, num_points]
         x = self.dp1(x)
         # x: [batch, 512, num_points]
         x = self.relu(self.bn2(self.conv2(x)))
-        # x: [batch, num_part_classes, num_points]
+        # x: [batch, num_obj_classes, num_points]
         x = self.conv3(x)
-        # x: [batch, num_points, num_part_classes]
+        # x: [batch, num_points, num_obj_classes]
         x = x.permute(0, 2, 1)
 
         return x

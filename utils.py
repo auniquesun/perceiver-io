@@ -11,7 +11,7 @@ from parser import args
 from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head
 from perceiver.model.core import PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
-from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer
+from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer_partseg, CrossFormer_semseg
 
 import torchvision.transforms as transforms
 
@@ -21,7 +21,7 @@ transform = transforms.Compose([transforms.Resize((args.img_height, args.img_wid
                                 transforms.RandomHorizontalFlip(),
                                 transforms.ToTensor(), 
                                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
-
+# shapenetpart: 16 object classes, 50 parts
 category2part = {'Airplane': [0, 1, 2, 3], 'Bag': [4, 5], 'Cap': [6, 7], 'Car': [8, 9, 10, 11], 'Chair': [12, 13, 14, 15], 
                     'Earphone': [16, 17, 18], 'Guitar': [19, 20, 21], 'Knife': [22, 23], 'Lamp': [24, 25, 26, 27], 'Laptop': [28, 29], 
                     'Motorbike': [30, 31, 32, 33, 34, 35], 'Mug': [36, 37], 'Pistol': [38, 39, 40], 'Rocket': [41, 42, 43], 
@@ -33,6 +33,12 @@ part2category = { 0:'Airplane', 1:'Airplane', 2:'Airplane', 3:'Airplane', 4:'Bag
                 32:'Motorbike', 33:'Motorbike', 34:'Motorbike', 35:'Motorbike', 36:'Mug', 37:'Mug', 38:'Pistol', 39:'Pistol',
                 40:'Pistol', 41:'Rocket', 42:'Rocket', 43:'Rocket', 44:'Skateboard', 45:'Skateboard', 46:'Skateboard',
                 47:'Table', 48:'Table', 49:'Table'}
+# s3dis: 13 object classes
+categories = ['ceiling', 'floor', 'wall', 'beam', 'column', 'window', 'door', 'table', 'chair', 'sofa', 'bookcase', 'board', 'clutter']
+category2label = {cls: i for i, cls in enumerate(categories)}
+label2category = {}
+for i, cat in enumerate(category2label.keys()):
+    label2category[i] = cat
 
 
 class AverageMeter(object):
@@ -97,10 +103,8 @@ def build_model(rank=None):
             which will pretrain on a selected dataset
     '''
     pc_input_adapter = PointCloudInputAdapter(
-        pointcloud_shape=(args.num_pt_points, 3),
-        num_input_channels=args.num_latent_channels,
-        num_groups=args.num_groups,
-        group_size=args.group_size).to(rank)
+        pointcloud_shape=(args.num_pt_points, args.point_channels),
+        num_input_channels=args.num_latent_channels).to(rank)
 
     # Generic Perceiver encoder
     pc_model = PerceiverEncoder_feats_head(
@@ -153,10 +157,8 @@ def build_ft_cls(rank=None):
     ''' construct a point cloud model, which will finetune on downstream datasets
     '''
     input_adapter = PointCloudInputAdapter(
-        pointcloud_shape=(args.num_pt_points, 3),
-        num_input_channels=args.num_latent_channels,
-        num_groups=args.num_groups,
-        group_size=args.group_size).to(rank)
+        pointcloud_shape=(args.num_pt_points, args.point_channels),
+        num_input_channels=args.num_latent_channels).to(rank)
     encoder = PerceiverEncoder(
         input_adapter=input_adapter,
         num_latents=args.num_pc_latents,  # N
@@ -196,12 +198,10 @@ def build_ft_cls(rank=None):
 
 def build_ft_partseg(rank=None):
     input_adapter = PointCloudInputAdapter(
-        pointcloud_shape=(args.num_ft_points, 3),
-        num_input_channels=args.num_latent_channels,
-        num_groups=args.num_groups,
-        group_size=args.group_size).to(rank)
+        pointcloud_shape=(args.num_ft_points, args.point_channels),
+        num_input_channels=args.num_latent_channels).to(rank)
 
-    model = CrossFormer(
+    model = CrossFormer_partseg(
         input_adapter=input_adapter,
         num_latents=args.num_pc_latents,
         num_latent_channels=args.num_latent_channels,
@@ -220,6 +220,31 @@ def build_ft_partseg(rank=None):
     return model
 
 
+def build_ft_semseg(rank=None):
+    input_adapter = PointCloudInputAdapter(
+        pointcloud_shape=(args.num_ft_points, args.point_channels),
+        num_input_channels=args.num_latent_channels).to(rank)
+
+    model = CrossFormer_semseg(
+        input_adapter=input_adapter,
+        point_channels=args.point_channels,
+        num_latents=args.num_pc_latents,
+        num_latent_channels=args.num_latent_channels,
+        group_size=args.group_size,
+        num_cross_attention_layers=args.num_ca_layers,
+        num_cross_attention_heads=args.num_ca_heads,
+        num_self_attention_layers=args.num_sa_layers,
+        num_self_attention_heads=args.num_sa_heads,
+        mlp_widen_factor=args.mlp_widen_factor,
+        max_dpr=args.max_dpr,
+        atten_drop=args.atten_drop,
+        mlp_drop=args.mlp_drop,
+        layer_idx=args.layer_idx,
+        num_obj_classes=args.num_obj_classes).to(rank)
+
+    return model
+
+
 def init(proj_name, exp_name, main_program, model_name):
     if not os.path.exists('runs'):
         os.makedirs('runs')
@@ -233,7 +258,7 @@ def init(proj_name, exp_name, main_program, model_name):
         os.makedirs(os.path.join('runs', proj_name, exp_name, 'models'))
 
     shutil.copy(main_program, os.path.join('runs', proj_name, exp_name, 'files'))
-    if main_program == 'ft_partseg.py':
+    if 'seg.py' in main_program:    # ft_partseg.py, ft_semseg.py
         shutil.copy(f'perceiver/model/pointcloud/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     else:
         shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
