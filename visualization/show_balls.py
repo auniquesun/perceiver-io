@@ -2,14 +2,19 @@
 import cv2
 import sys
 import os
-import argparse
 import numpy as np
 import ctypes as ct
+
+import torch
+from torch.utils.data import DataLoader
+from parser import args
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 ROOT_DIR = os.path.dirname(BASE_DIR)
+sys.path.append(ROOT_DIR)
+from utils import build_ft_partseg, build_ft_semseg
 sys.path.append(os.path.join(ROOT_DIR, 'datasets'))
 from shapenet_part import ShapeNetPart
 
@@ -167,38 +172,24 @@ def showpoints(xyz, c_gt=None, c_pred=None, waittime=0, showrot=False, magnifyBl
             zoom = 1.0
             changed = True
         elif cmd == ord('s'):
-            cv2.imwrite('show3d.png', show)
+            cv2.imwrite(f'figures/pred_{args.class_choice}.png', show)
         if waittime != 0:
             break
     return cmd
 
 
+def to_categorical(obj_label, num_classes):
+    """ 1-hot encodes a tensor """
+    return torch.eye(num_classes, device=obj_label.device)[obj_label.numpy(),]
+
+
 if __name__ == '__main__':
 
     '''
-    Airplane	02691156
-    Bag	        02773838
-    Cap	        02954340
-    Car	        02958343
-    Chair	    03001627
-    Earphone	03261776
-    Guitar	    03467517
-    Knife	    03624134
-    Lamp	    03636649
-    Laptop	    03642806
-    Motorbike   03790512
-    Mug	        03797390
-    Pistol	    03948459
-    Rocket	    04099429
-    Skateboard  04225987
-    Table	    04379243
+    代码逻辑：
+        模型加载数据，前向传播，接收的都是tensor，这些tensor是放在batch里的，
+            但显示图像要一张张来，所以生成预测后再来个循环，遍历循环中每个实例
     '''
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--category', type=str, default='Airplane', help='select category')
-    parser.add_argument('--npoints', type=int, default=2048, help='resample points number')
-    parser.add_argument('--ballradius', type=int, default=10, help='ballradius')
-    opt = parser.parse_args()
 
     part2category = { 0:'Airplane', 1:'Airplane', 2:'Airplane', 3:'Airplane', 4:'Bag', 5:'Bag', 6:'Cap', 7:'Cap', 
                 8:'Car', 9:'Car', 10:'Car', 11:'Car', 12:'Chair', 13:'Chair', 14:'Chair', 15:'Chair', 
@@ -207,6 +198,10 @@ if __name__ == '__main__':
                 32:'Motorbike', 33:'Motorbike', 34:'Motorbike', 35:'Motorbike', 36:'Mug', 37:'Mug', 38:'Pistol', 39:'Pistol',
                 40:'Pistol', 41:'Rocket', 42:'Rocket', 43:'Rocket', 44:'Skateboard', 45:'Skateboard', 46:'Skateboard',
                 47:'Table', 48:'Table', 49:'Table'}
+    category2part = {'Airplane': [0, 1, 2, 3], 'Bag': [4, 5], 'Cap': [6, 7], 'Car': [8, 9, 10, 11], 'Chair': [12, 13, 14, 15], 
+                    'Earphone': [16, 17, 18], 'Guitar': [19, 20, 21], 'Knife': [22, 23], 'Lamp': [24, 25, 26, 27], 'Laptop': [28, 29], 
+                    'Motorbike': [30, 31, 32, 33, 34, 35], 'Mug': [36, 37], 'Pistol': [38, 39, 40], 'Rocket': [41, 42, 43], 
+                    'Skateboard': [44, 45, 46], 'Table': [47, 48, 49]}
 
     cmap = np.array([[1.00000000e+00, 0.00000000e+00, 0.00000000e+00],
                      [3.12493437e-02, 1.00000000e+00, 1.31250131e-06],
@@ -219,26 +214,56 @@ if __name__ == '__main__':
                      [1.00000000e+00, 0.00000000e+00, 9.37500000e-02],
                      [1.00000000e+00, 0.00000000e+00, 9.37500000e-02]])
                      
-    dataset = ShapeNetPart(opt.npoints, partition='test')
-    idx = np.random.choice(len(dataset), 200, replace=True)
-    flag = True
+    test_dataset = ShapeNetPart(partition='test', num_points=args.num_ft_points)
+    test_loader = DataLoader(test_dataset, 
+                            batch_size=args.test_batch_size, 
+                            shuffle=True,   # shuffle the order every time
+                            num_workers=0, 
+                            pin_memory=True, 
+                            drop_last=False)
 
-    for i in idx:
-        data = dataset[i]
-        points, _, seg = data
-        part = seg[0]
-        if part2category[part] == opt.category:
-            print('points.shape:', points.shape)
-            print('seg.shape:', seg.shape)
+    model = build_ft_partseg()
+    state_dict = torch.load(args.pc_model_file)
+    model.load_state_dict(state_dict['model_state_dict'])
+
+    flag = False
+
+    for points, obj_label, partseg_label in test_loader:
+        # obj_label: [batch],    partseg_label: [batch, num_points]
+        batch_size, num_points, _ = points.size()
+
+        for i in range(batch_size):
+            part = partseg_label[i][0].item()
+            # find target class == `i-th` instance in this batch
+            if part2category[part] == args.class_choice: 
+                flag = True
+                break
+
+        if flag:
+            # partseg_pred: [batch_size, num_points, num_part_classes]
+            partseg_pred = model(points, to_categorical(obj_label, 16))
+
+            refined_pred = torch.zeros(batch_size, num_points, dtype=torch.int32, device=partseg_pred.device)
+            for j in range(batch_size):
+                # partseg_label[i, 0] is a tensor, it should be converted to an integer to serve as an index
+                idx = partseg_label[j, 0].item()
+                cat = part2category[idx]
+                logits = partseg_pred[j, :, :]
+                refined_pred[j, :] = torch.argmax(logits[:, category2part[cat]], dim=1) + category2part[cat][0]
             
-            seg = seg - seg.min()
-            gt = cmap[seg, :]
-            pred = cmap[seg, :]
-            showpoints(points, gt, c_pred=pred, waittime=0, showrot=False, magnifyBlue=0, freezerot=False,
-                    background=(255, 255, 255), normalizecolor=True, ballradius=opt.ballradius)
-            
-            flag = False
+            points = points[i].numpy()
+            gt_label = partseg_label[i] - partseg_label[i].min()
+            gt_label = gt_label.numpy()
+            pred_label = refined_pred[i] - refined_pred[i].min()
+            pred_label = pred_label.numpy()
+
             break
 
     if flag:
-        print(f'There is no {opt.category} in this batch!')
+        # points: [2048, 3], gt_label: [2048], pred_label: [2048]
+        gt = cmap[gt_label, :]
+        pred = cmap[pred_label, :]
+        showpoints(points, gt, c_pred=pred, waittime=0, showrot=False, magnifyBlue=0, freezerot=False,
+                background=(255, 255, 255), normalizecolor=True, ballradius=args.ballradius)
+    else:
+        print(f'There is no {args.class_choice} in test_loader!')

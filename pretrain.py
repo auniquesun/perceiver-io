@@ -33,6 +33,7 @@ def setup(rank):
     os.environ['MASTER_PORT'] = args.master_port
 
     dist.init_process_group(args.backend, rank=rank, world_size=args.world_size)
+    torch.cuda.set_device(rank)
 
     
 def cleanup():
@@ -83,9 +84,11 @@ def main(rank, logger_name, log_path, log_file):
         test_val_loader = DataLoader(
             ScanObjectNNSVM(partition='test', num_points=args.num_test_points), 
             batch_size=args.test_batch_size, shuffle=True, num_workers=0, pin_memory=True)
-
-    pc_model, img_model = build_model(rank=rank)
-    pc_model, img_model = pc_model, img_model
+    
+    if args.modality != 'imc-only':
+        pc_model, img_model = build_model(rank=rank)
+    else: 
+        pc_model = build_model(rank=rank)
 
     if args.resume:
         path = os.path.join('runs', args.proj_name, args.exp_name, 'models', args.pc_model_file)
@@ -95,10 +98,13 @@ def main(rank, logger_name, log_path, log_file):
         pretrained = torch.load(path)
         img_model.load_state_dict(pretrained)
 
-    pc_model_ddp = DDP(pc_model, device_ids=[rank], find_unused_parameters=False)
-    img_model_ddp = DDP(img_model, device_ids=[rank], find_unused_parameters=False)
-
-    parameters = list(pc_model_ddp.parameters()) + list(img_model_ddp.parameters())
+    if args.modality != 'imc-only':
+        pc_model_ddp = DDP(pc_model, device_ids=[rank], find_unused_parameters=False)
+        img_model_ddp = DDP(img_model, device_ids=[rank], find_unused_parameters=False)
+        parameters = list(pc_model_ddp.parameters()) + list(img_model_ddp.parameters())
+    else:
+        pc_model_ddp = DDP(pc_model, device_ids=[rank], find_unused_parameters=False)
+        parameters = pc_model_ddp.parameters()
 
     if args.optim == 'sgd':
         optimizer = optim.SGD(
@@ -150,7 +156,8 @@ def main(rank, logger_name, log_path, log_file):
     for epoch in range(args.epochs):
         # ------ Train
         pc_model_ddp.train()
-        img_model_ddp.train()
+        if args.modality != 'imc-only':
+            img_model_ddp.train()
         train_sampler.set_epoch(epoch)
 
         # average losses across all scanned batches within an epoch
@@ -170,39 +177,45 @@ def main(rank, logger_name, log_path, log_file):
                 pc = torch.cat([pc_t1, pc_t2], dim=0)
                 # pc_model_ddp(pc)[0] is the features with the projection head
                 pc_feats = pc_model_ddp(pc)[0]
-                img_feats = img_model_ddp(imgs)[0]
-
                 pc_t1_feats = pc_feats[:batch_size, :]
                 pc_t2_feats = pc_feats[batch_size:, :]
 
-                loss_imid = criterion(pc_t1_feats, pc_t2_feats)
-                pc_feats = (pc_t1_feats + pc_t2_feats) / 2
-                loss_cmid = criterion(pc_feats, img_feats)
-                # penalyze more on loss_cmid
+                if args.modality != 'imc-only':
+                    if args.modality == 'cmc-only':
+                        loss_imid = 0
+                    elif args.modality == 'both':
+                        loss_imid = criterion(pc_t1_feats, pc_t2_feats)
+                    pc_feats = (pc_t1_feats + pc_t2_feats) / 2
+                    img_feats = img_model_ddp(imgs)[0]
+                    loss_cmid = criterion(pc_feats, img_feats)
+                else:
+                    loss_imid = criterion(pc_t1_feats, pc_t2_feats)
+                    loss_cmid = 0
+                # args.cmid_weight is a balanced factor, default 1.0
                 total_loss = loss_imid + args.cmid_weight*loss_cmid
 
             scaler.scale(total_loss).backward()
             scaler.step(optimizer)
             scaler.update()
-            # total_loss.backward()
-            # # clip grad to prevent exploding, following Point-MAE and Point-Bert
-            # torch.nn.utils.clip_grad_norm_(pc_model_ddp.parameters(), 10, norm_type=2)
-            # torch.nn.utils.clip_grad_norm_(img_model_ddp.parameters(), 10, norm_type=2)
-            # optimizer.step()
 
-            train_imid_loss.update(loss_imid.item(), batch_size)
-            train_cmid_loss.update(loss_cmid.item(), batch_size)
+            if args.modality != 'imc-only':
+                if args.modality == 'both':
+                    train_imid_loss.update(loss_imid.item(), batch_size)
+                train_cmid_loss.update(loss_cmid.item(), batch_size)
+            else:
+                train_imid_loss.update(loss_imid.item(), batch_size)
             train_loss.update(total_loss.item(), batch_size)
 
             if i % args.print_freq == 0:
                 logger.write(f'Epoch: {epoch}/{args.epochs}, Batch: {i}/{len(train_loader)}, '
-                             f'Loss IMID: {loss_imid}, Loss CMID: {loss_cmid} '
-                             f'Loss Total: {total_loss}', rank=rank)
+                             f'<{args.modality}> Loss IMID: {train_imid_loss.avg}, Loss CMID: {train_cmid_loss.avg} '
+                             f'Loss Total: {train_loss.avg}', rank=rank)
 
         # ------ Test
         with torch.no_grad():   # it will disable gradients computation and save memory
             pc_model_ddp.eval()
-            img_model_ddp.eval()
+            if args.modality != 'imc-only':
+                img_model_ddp.eval()
 
             train_feats = []
             train_labels = []
@@ -259,8 +272,9 @@ def main(rank, logger_name, log_path, log_file):
                     logger.write('Saving best model ...', rank=rank)
                     save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
                     torch.save(pc_model_ddp.module.state_dict(), save_path)
-                    save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'img_model_best.pth')
-                    torch.save(img_model_ddp.module.state_dict(), save_path)
+                    if args.modality != 'imc-only':
+                        save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'img_model_best.pth')
+                        torch.save(img_model_ddp.module.state_dict(), save_path)
 
                 wandb_log = dict()
                 # NOTE get_lr() vs. get_last_lr(), which should be used? The answer is get_last_lr()
@@ -280,7 +294,6 @@ def main(rank, logger_name, log_path, log_file):
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final best svm score: {best_test_acc} at epoch {best_epoch}!', rank=rank)
         logger.write(f'Final best linear SVM score: {best_test_acc} at epoch {best_epoch}!', rank=rank)
         wandb.finish()
 

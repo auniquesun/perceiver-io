@@ -9,6 +9,7 @@ from utils import build_model
 from parser import args
 
 
+print(f'Preparing {args.pt_dataset} dataset ...')
 if args.pt_dataset == "ModelNet40":
     test_loader = DataLoader(
         ModelNet40SVM(partition='test', num_points=args.num_test_points), 
@@ -17,6 +18,7 @@ elif args.pt_dataset == "ScanObjectNN":
     test_loader = DataLoader(
         ScanObjectNNSVM(partition='test', num_points=args.num_test_points), 
         batch_size=args.test_batch_size, shuffle=True)
+print(f'Dataset done!')
 
 device = torch.device('cuda:0')
 # build_model 是预训练模型
@@ -48,6 +50,10 @@ with torch.no_grad():
     print('Forward done!')
 
     state_dict = {'feats_test': np.array(feats_test), 'labels_test': np.array(labels_test)}
-    # ModelNet features and labels in test set
-    torch.save(state_dict, 'visualization/MN_test_feats_labels.pth')
-    print('Save done!')
+    
+    if args.pt_dataset == "ModelNet40":
+        filename = 'visualization/MN_test_feats_labels.pth'
+    else: 
+        filename = 'visualization/SO_test_feats_labels.pth'
+    torch.save(state_dict, filename)
+    print(f'{args.pt_dataset} - Save done!')

@@ -461,14 +461,12 @@ class PerceiverEncoder_feats_head(PerceiverEncoder):
         super().__init__(input_adapter, num_latents, num_latent_channels, num_cross_attention_heads, num_cross_attention_qk_channels, num_cross_attention_v_channels, num_cross_attention_layers, first_cross_attention_layer_shared, cross_attention_widening_factor, num_self_attention_heads, num_self_attention_qk_channels, num_self_attention_v_channels, num_self_attention_layers_per_block, num_self_attention_blocks, first_self_attention_block_shared, self_attention_widening_factor, dropout, activation_checkpointing)
 
         self.latent_head = nn.Sequential(
-            nn.BatchNorm1d(num_latent_channels),
+            nn.BatchNorm1d(2*num_latent_channels), 
+            nn.ReLU(), 
+            nn.Linear(2*num_latent_channels, num_latent_channels, bias = False),
+            nn.BatchNorm1d(num_latent_channels), 
+            nn.ReLU(), 
             nn.Linear(num_latent_channels, num_latent_channels, bias = False))
-        # self.latent_head = nn.Sequential(
-        #     nn.BatchNorm1d(num_latent_channels),
-        #     nn.Linear(num_latent_channels, num_latent_channels, bias = False),
-        #     nn.BatchNorm1d(num_latent_channels),
-        #     nn.ReLU(),
-        #     nn.Linear(num_latent_channels, num_latent_channels, bias = False))
 
     def forward(self, x, pad_mask=None):
         b, *_ = x.shape
@@ -487,7 +485,7 @@ class PerceiverEncoder_feats_head(PerceiverEncoder):
                 x_latent = self.cross_attn_n(x_latent, x, pad_mask)
             x_latent = self.self_attn_n(x_latent)
 
-        backbone_feats = x_latent.max(1)[0]
+        backbone_feats = torch.cat([x_latent.max(1)[0], x_latent.mean(1)], dim=1)
         x_latent_feats = self.latent_head(backbone_feats)
 
         return x_latent_feats, backbone_feats

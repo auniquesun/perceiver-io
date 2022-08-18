@@ -17,7 +17,7 @@ from datasets.shapenet_part import ShapeNetPart
 from torch.utils.data import DataLoader
 
 from utils import AccuracyMeter, init, Logger, AverageMeter
-from utils import build_ft_partseg, category2part, part2category
+from utils import build_ft_partseg, category2part, part2category, shapenetpart_part_weights
 from parser import args
 
 
@@ -125,9 +125,13 @@ def main(rank, logger_name, log_path, log_file):
             optimizer, 
             step_size=args.step_size)
 
-    criterion = CrossEntropyLoss(label_smoothing=0.2)
+    part_weights = torch.tensor(shapenetpart_part_weights, device=torch.device(f'cuda:{rank}'))
+    criterion = CrossEntropyLoss(weight=part_weights, label_smoothing=0.2)
 
+    test_best_point_level_acc = .0
+    test_best_mean_part_acc = .0
     test_best_mean_part_iou = .0
+    test_best_mean_category_iou = .0
     best_epoch = 0
     for epoch in range(args.epochs):
         # ------ Train
@@ -189,10 +193,17 @@ def main(rank, logger_name, log_path, log_file):
             logger.write(outstr, rank=rank)
 
             if rank == 0:
+                if test_point_level_acc > test_best_point_level_acc:
+                    test_best_point_level_acc = test_point_level_acc
+                if test_mean_part_acc > test_best_mean_part_acc:
+                    test_best_mean_part_acc = test_mean_part_acc
                 if test_mean_part_iou > test_best_mean_part_iou:
                     test_best_mean_part_iou = test_mean_part_iou
+
+                if test_mean_category_iou > test_best_mean_category_iou:
+                    test_best_mean_category_iou = test_mean_category_iou
                     best_epoch = epoch
-                    logger.write(f'Find new highest Mean Part IoU: {test_best_mean_part_iou} at epoch {best_epoch}!', rank=rank)
+                    logger.write(f'Find new highest Mean Part IoU: {test_best_mean_category_iou} at epoch {best_epoch}!', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_state = {'epoch': epoch, # start from 0
                         'test_loss': test_loss, 
@@ -213,7 +224,9 @@ def main(rank, logger_name, log_path, log_file):
                 wandb_log["train_loss"] = train_loss
                 wandb_log["train_point_level_acc"] = train_acc
                 wandb_log["test_point_level_acc"] = test_point_level_acc
+                wandb_log["test_best_point_level_acc"] = test_best_point_level_acc
                 wandb_log["test_mean_part_acc"] = test_mean_part_acc
+                wandb_log["test_best_mean_part_acc"] = test_best_mean_part_acc
                 wandb_log["test_mean_part_iou"] = test_mean_part_iou
                 wandb_log["test_mean_category_iou"]= test_mean_category_iou
                 wandb_log["test_best_mean_part_iou"] = test_best_mean_part_iou
