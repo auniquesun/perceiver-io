@@ -1,8 +1,10 @@
+import imp
 from typing import Optional
 
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
 from fairscale.nn import checkpoint_wrapper
 
 from timm.models.layers import DropPath
@@ -160,7 +162,7 @@ class CrossAttentionLayer(Sequential):
             dropout=atten_drop,
         )
         super().__init__(
-            Residual(cross_attn, mlp_drop, drop_path_rate) if attention_residual else cross_attn,
+            Residual(cross_attn, atten_drop, drop_path_rate) if attention_residual else cross_attn,
             Residual(MLP(num_q_input_channels, widening_factor), mlp_drop, drop_path_rate),
         )
 
@@ -243,6 +245,7 @@ class Encoder(nn.Module):
         atten_drop: float = 0.0,
         mlp_drop: float = 0.0,
         activation_checkpointing: bool = False,
+        modal_prior: bool = False
     ):
         """Generic Perceiver IO encoder.
 
@@ -306,7 +309,9 @@ class Encoder(nn.Module):
                                 atten_drop=atten_drop,
                                 mlp_drop=mlp_drop))
 
-    def forward(self, group_embs, pos_embs, pts, layer_idx, pad_mask=None):
+        self.modal_prior = modal_prior
+
+    def forward(self, group_embs, pos_embs, pts_embs, layer_idx=[], pad_mask=None):
         ''' The overall idea is conducting CrossAttention, followed by SelfAttention
                 - e.g. 1 CrossAttentionLayers + 11 SelfAttentionLayers = 12 layers in total
             Args:
@@ -318,7 +323,7 @@ class Encoder(nn.Module):
                 x_latent: [batch, num_groups, num_latent_channels]
         '''
         # ------ 每次经过AttentionLayer，都要加上位置编码
-        x_latent = self.cross_attn_1(group_embs+pos_embs, pts, pad_mask)
+        x_latent = self.cross_attn_1(group_embs+pos_embs, pts_embs, pad_mask)
 
         layer_feats = []
         idx = layer_idx
@@ -326,12 +331,15 @@ class Encoder(nn.Module):
         for i, sa_layer in enumerate(self.sa_layers):
             # bypass `cross_attn_1` because it has been executed before the loop
             if i+1 < self.num_cross_attention_layers:
-                x_latent = self.cross_attn_n(x_latent+pos_embs, pts, pad_mask)
+                x_latent = self.cross_attn_n(x_latent+pos_embs, pts_embs, pad_mask)
             x_latent = sa_layer(x_latent+pos_embs)
             if i+1 in idx:
                 layer_feats.append(x_latent)
 
-        return layer_feats
+        if not self.modal_prior:
+            return layer_feats
+        else:
+            return x_latent
 
 
 class CrossFormer_partseg(nn.Module):
@@ -460,3 +468,159 @@ class CrossFormer_partseg(nn.Module):
         x = x.permute(0, 2, 1)
 
         return x
+
+
+class CrossFormer_pc_mp(nn.Module):
+    '''
+        Implement CrossFormer with `pointcloud-prior` knowledge, that contain geometric relation in a local point patch
+    '''
+    def __init__(self, 
+        input_adapter = None,
+        num_latents=128,
+        num_latent_channels=384,
+        group_size=32,
+        num_cross_attention_layers=1,
+        num_cross_attention_heads=6,
+        num_self_attention_layers=6,
+        num_self_attention_heads=6,
+        mlp_widen_factor=4,
+        max_dpr=.0,
+        atten_drop=0.1,
+        mlp_drop=.5,
+        modal_prior=True):
+        super().__init__()
+
+        self.num_groups = num_latents
+        self.group_size = group_size
+
+        self.group2emb = Group2Emb(num_latent_channels)
+
+        self.position_emb = nn.Sequential(
+            nn.Linear(3, 128),
+            nn.GELU(),
+            nn.Linear(128, num_latent_channels))
+
+        self.input_adapter = input_adapter
+
+        dpr_list = [x.item() for x in torch.linspace(0, max_dpr, num_self_attention_layers)]
+        self.encoder = Encoder(
+            num_latent_channels=num_latent_channels,
+            num_cross_attention_layers=num_cross_attention_layers,
+            num_cross_attention_heads=num_cross_attention_heads,
+            cross_attention_widening_factor=mlp_widen_factor,
+            num_self_attention_layers=num_self_attention_layers,
+            num_self_attention_heads=num_self_attention_heads,
+            self_attention_widening_factor=mlp_widen_factor,
+            dpr_list=dpr_list,
+            atten_drop=atten_drop,
+            mlp_drop=mlp_drop,
+            modal_prior=modal_prior)
+
+        self.latent_head = nn.Sequential(
+            nn.BatchNorm1d(2*num_latent_channels), 
+            nn.ReLU(), 
+            nn.Linear(2*num_latent_channels, num_latent_channels, bias = False),
+            nn.BatchNorm1d(num_latent_channels), 
+            nn.ReLU(), 
+            nn.Linear(num_latent_channels, num_latent_channels, bias = False))
+
+    def forward(self, pts):
+        '''
+            Args:
+                pts: [batch, num_points, 3]
+            Return:
+                x_latent: [batch, num_points, num_part_classes]
+        '''
+        B, N, _ = pts.shape
+        # encode each input point -> pts_embs: [batch, num_points, num_latent_channels]
+        pts_embs = self.input_adapter(pts)
+
+        # neighborhood: [batch, num_groups, group_size, 3]    center: [batch, num_groups, 3]
+        neighborhood, center = divide_patches(pts, self.num_groups, self.group_size)
+        # group_embs: [batch, num_groups, num_latent_channels]
+        group_embs = self.group2emb(neighborhood)
+        # pos_embs: [batch, num_groups, num_latent_channels]
+        pos_embs = self.position_emb(center)
+
+        # x_latent: [batch, num_groups, dim_model]
+        x_latent = self.encoder(group_embs, pos_embs, pts_embs)
+        # backbone_feats: [batch, 2*dim_model]
+        backbone_feats = torch.cat([x_latent.max(1)[0], x_latent.mean(1)], dim=1)
+        x_latent_feats = self.latent_head(backbone_feats)
+
+        return x_latent_feats, backbone_feats
+
+
+class CrossFormer_img_mp(nn.Module):
+    '''
+        Implement CrossFormer with `image-modal prior` knowledge, that contain geometric relation in a local point patch
+    '''
+    def __init__(self, 
+        img_height=144,
+        img_width=144,
+        patch_size=12,
+        num_latent_channels=384,
+        num_cross_attention_layers=1,
+        num_cross_attention_heads=6,
+        num_self_attention_layers=6,
+        num_self_attention_heads=6,
+        mlp_widen_factor=4,
+        max_dpr=.0,
+        atten_drop=0.1,
+        mlp_drop=.5,
+        modal_prior=True):
+        super().__init__()
+
+        num_patches = (img_height // patch_size) * (img_width // patch_size)
+
+        # project image patches to image embeddings
+        self.patch2emb = nn.Sequential(
+            Rearrange('b (h p1) (w p2) c -> b (h w) (p1 p2 c)', p1=patch_size, p2=patch_size),
+            nn.Linear(patch_size*patch_size*3, num_latent_channels)
+        )
+
+        # position encoding: learn or use Fourier equation?
+        self.position_emb = nn.Parameter(torch.randn(1, num_patches, num_latent_channels))
+
+        dpr_list = [x.item() for x in torch.linspace(0, max_dpr, num_self_attention_layers)]
+        self.encoder = Encoder(
+            num_latent_channels=num_latent_channels,
+            num_cross_attention_layers=num_cross_attention_layers,
+            num_cross_attention_heads=num_cross_attention_heads,
+            cross_attention_widening_factor=mlp_widen_factor,
+            num_self_attention_layers=num_self_attention_layers,
+            num_self_attention_heads=num_self_attention_heads,
+            self_attention_widening_factor=mlp_widen_factor,
+            dpr_list=dpr_list,
+            atten_drop=atten_drop,
+            mlp_drop=mlp_drop,
+            modal_prior=modal_prior)
+
+        self.latent_head = nn.Sequential(
+            nn.BatchNorm1d(2*num_latent_channels), 
+            nn.ReLU(), 
+            nn.Linear(2*num_latent_channels, num_latent_channels, bias = False),
+            nn.BatchNorm1d(num_latent_channels), 
+            nn.ReLU(), 
+            nn.Linear(num_latent_channels, num_latent_channels, bias = False))
+
+    def forward(self, imgs):
+        '''
+            Args:
+                imgs: [batch, height, width, 3]
+            Return:
+                x_latent: [batch, num_patches, num_latent_channels]
+        '''
+        # patch_embs: [batch, num_patches, num_latent_channels]
+        patch_embs = self.patch2emb(imgs)
+        # pos_embs: [batch, num_patches, num_latent_channels]
+        pos_embs = self.position_emb
+
+        # x_latent: [batch, num_patches, num_latent_channels]
+        x_latent = self.encoder(patch_embs, pos_embs, patch_embs)
+        # backbone_feats: [batch, 2*num_latent_channels]
+        backbone_feats = torch.cat([x_latent.max(1)[0], x_latent.mean(1)], dim=1)
+        # x_latent_feats: [batch, num_latent_channels]
+        x_latent_feats = self.latent_head(backbone_feats)
+
+        return x_latent_feats, backbone_feats

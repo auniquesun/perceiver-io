@@ -16,14 +16,15 @@ parser.add_argument('--model_name', type=str, default='modules.py', metavar='N',
 
 parser.add_argument('--seed', type=int, default=1, metavar='S',
                     help='random seed (default: 1)')
+parser.add_argument('--mp', action="store_true", help='whether to pretrain CrossFormer with modal prior knowledge')
 parser.add_argument('--modality', type=str, default='both', metavar='N',
                     choices=['cmc-only', 'imc-only', 'both'], 
                     help='which modality to use, cmc: cross-modal, imc: intra-modal')
 
 parser.add_argument('--resume', action="store_true", help='resume from checkpoint')
-parser.add_argument('--pc_model_file', type=str, default='pc_best_model.pth', metavar='N',
+parser.add_argument('--pc_model_file', type=str, default='pc_model_best.pth', metavar='N',
                     help='saved point model name')
-parser.add_argument('--img_model_file', type=str, default='img_best_model.pth', metavar='N',
+parser.add_argument('--img_model_file', type=str, default='img_model_best.pth', metavar='N',
                     help='saved image model name')
 
 parser.add_argument('--eval', action='store_true',  help='evaluate the model')
@@ -108,6 +109,7 @@ parser.add_argument('--cmid_weight', type=float, default=1.0,
 
 parser.add_argument('--img_height', type=int, default=224, help='input image height')
 parser.add_argument('--img_width', type=int, default=224, help='input image width')
+parser.add_argument('--patch_size', type=int, default=12, help='image patch size')
 # ---------
 
 parser.add_argument('--save_freq', type=int, default=50, help='save frequency')
@@ -120,7 +122,7 @@ parser.add_argument('--gpu_id', type=int, default=0, help='specify the GPU devic
                     'to train of finetune model')
 
 # distributed training on multiple GPUs
-parser.add_argument('--rank', type=int, default=-1, help='the rank for current GPU or process, '
+parser.add_argument('--rank', type=int, default=0, help='the rank for current GPU or process, '
                     'ususally one process per GPU')
 parser.add_argument('--backend', type=str, default='nccl', help='DDP communication backend')
 parser.add_argument('--world_size', type=int, default=6, help='number of GPUs')
@@ -136,10 +138,11 @@ parser.add_argument('--output_seq_length', type=int, default=1, help='output seq
 
 # downstream task: Segmentation settings
 parser.add_argument('--class_choice', type=str, default=None, metavar='N',
-                    choices=['airplane', 'bag', 'cap', 'car', 'chair',
-                                'earphone', 'guitar', 'knife', 'lamp', 'laptop', 
-                                'motor', 'mug', 'pistol', 'rocket', 'skateboard', 'table'])
-parser.add_argument('--svm_coff', type=float, default=0.1, help='linear_svm coefficient')
+                    choices=['Airplane', 'Bag', 'Cap', 'Car', 'Chair',
+                                'Earphone', 'Guitar', 'Knife', 'Lamp', 'Laptop', 
+                                'Motor', 'Mug', 'Pistol', 'Rocket', 'Skateboard', 'Table'])
+parser.add_argument('--ballradius', type=int, default=10, help='ballradius')
+parser.add_argument('--svm_coff', type=float, default=1.0, help='linear_svm coefficient')
 
 # few-shot learning
 parser.add_argument('--n_runs', type=int, default=10,
@@ -150,10 +153,6 @@ parser.add_argument('--n_shot', type=int, default=10,
                         help='Num of samples in one class')
 parser.add_argument('--n_query', type=int, default=20,
                         help='Num of query samples in one class')
-
-# visualization
-parser.add_argument('--category', type=str, default='Airplane', help='select category')
-parser.add_argument('--ballradius', type=int, default=10, help='ballradius')
 
 # wandb settings
 parser.add_argument('--wb_url', type=str, default="http://202.112.113.241:28282", help='wandb server url')

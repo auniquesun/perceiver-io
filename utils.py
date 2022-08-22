@@ -1,6 +1,7 @@
 import os
 import shutil
 import logging
+from unittest.mock import patch
 import numpy as np
 
 import torch
@@ -12,6 +13,7 @@ from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head
 from perceiver.model.core import PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
 from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer_partseg, CrossFormer_semseg
+from perceiver.model.pointcloud import CrossFormer_pc_mp, CrossFormer_img_mp
 
 import torchvision.transforms as transforms
 
@@ -22,6 +24,11 @@ transform = transforms.Compose([transforms.Resize((args.img_height, args.img_wid
                                 transforms.ToTensor(), 
                                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 # shapenetpart: 16 object classes, 50 parts
+shapenetpart_part_weights = [0.0756, 0.0547, 0.0214, 0.0160, 0.0003, 0.0041, 0.0023, 0.0008, 
+                0.0028, 0.0038, 0.0085, 0.0378, 0.0742, 0.0900, 0.0466, 0.0073, 0.0024, 0.0010, 
+                0.0005, 0.0039, 0.0087, 0.0323, 0.0113, 0.0109, 0.0148, 0.0537, 0.0011, 0.0204, 
+                0.0140, 0.0122, 0.0005, 0.0004, 0.0025, 0.0002, 7.6761e-05, 0.0071, 0.0006, 0.0098, 0.0112, 
+                0.0049, 0.0009, 0.0027, 0.0007, 0.0004, 0.0010, 0.0070, 0.0006, 0.2342, 0.0727, 0.0089]
 category2part = {'Airplane': [0, 1, 2, 3], 'Bag': [4, 5], 'Cap': [6, 7], 'Car': [8, 9, 10, 11], 'Chair': [12, 13, 14, 15], 
                     'Earphone': [16, 17, 18], 'Guitar': [19, 20, 21], 'Knife': [22, 23], 'Lamp': [24, 25, 26, 27], 'Laptop': [28, 29], 
                     'Motorbike': [30, 31, 32, 33, 34, 35], 'Mug': [36, 37], 'Pistol': [38, 39, 40], 'Rocket': [41, 42, 43], 
@@ -33,7 +40,9 @@ part2category = { 0:'Airplane', 1:'Airplane', 2:'Airplane', 3:'Airplane', 4:'Bag
                 32:'Motorbike', 33:'Motorbike', 34:'Motorbike', 35:'Motorbike', 36:'Mug', 37:'Mug', 38:'Pistol', 39:'Pistol',
                 40:'Pistol', 41:'Rocket', 42:'Rocket', 43:'Rocket', 44:'Skateboard', 45:'Skateboard', 46:'Skateboard',
                 47:'Table', 48:'Table', 49:'Table'}
+
 # s3dis: 13 object classes
+s3dis_obj_weights = [0.2525, 0.2322, 0.1732, 0.0242, 0.0156, 0.0106, 0.0460, 0.0340, 0.0533, 0.0049, 0.0329, 0.0069, 0.1138]
 categories = ['ceiling', 'floor', 'wall', 'beam', 'column', 'window', 'door', 'table', 'chair', 'sofa', 'bookcase', 'board', 'clutter']
 category2label = {cls: i for i, cls in enumerate(categories)}
 label2category = {}
@@ -103,54 +112,91 @@ def build_model(rank=None):
             which will pretrain on a selected dataset
     '''
     pc_input_adapter = PointCloudInputAdapter(
-        pointcloud_shape=(args.num_pt_points, args.point_channels),
-        num_input_channels=args.num_latent_channels).to(rank)
+    pointcloud_shape=(args.num_pt_points, args.point_channels),
+    num_input_channels=args.num_latent_channels).to(rank)
 
-    # Generic Perceiver encoder
-    pc_model = PerceiverEncoder_feats_head(
-        input_adapter=pc_input_adapter,
-        num_latents=args.num_pc_latents,  # N
-        num_latent_channels=args.num_latent_channels,  # D
-        num_cross_attention_heads=args.num_ca_heads,
-        num_cross_attention_qk_channels=pc_input_adapter.num_input_channels,  # C
-        num_cross_attention_v_channels=None,
+    if args.mp:
+        pc_model = CrossFormer_pc_mp(input_adapter=pc_input_adapter,
+        num_latents=args.num_pc_latents,
+        num_latent_channels=args.num_latent_channels,
+        group_size=args.group_size,
         num_cross_attention_layers=args.num_ca_layers,
-        first_cross_attention_layer_shared=False,
-        cross_attention_widening_factor=args.mlp_widen_factor,
-        num_self_attention_heads=args.num_sa_heads,
-        num_self_attention_qk_channels=None,
-        num_self_attention_v_channels=None,
-        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
-        num_self_attention_blocks=args.num_sa_blocks,
-        first_self_attention_block_shared=True,
-        self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop).to(rank)
-
-    img_input_adapter = ImageInputAdapter(
-        image_shape=(args.img_height, args.img_width, 3),
-        num_frequency_bands=64).to(rank)
-
-    # Generic Perceiver encoder
-    img_model = PerceiverEncoder_feats_head(
-        input_adapter=img_input_adapter,
-        num_latents=args.num_img_latents,  # N
-        num_latent_channels=args.num_latent_channels,  # D
         num_cross_attention_heads=args.num_ca_heads,
-        num_cross_attention_qk_channels=args.num_latent_channels,  # C
-        num_cross_attention_v_channels=None,
-        num_cross_attention_layers=args.num_ca_layers,
-        first_cross_attention_layer_shared=False,
-        cross_attention_widening_factor=args.mlp_widen_factor,
+        num_self_attention_layers=args.num_sa_layers,
         num_self_attention_heads=args.num_sa_heads,
-        num_self_attention_qk_channels=None,
-        num_self_attention_v_channels=None,
-        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
-        num_self_attention_blocks=args.num_sa_blocks,
-        first_self_attention_block_shared=True,
-        self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop).to(rank)
+        mlp_widen_factor=args.mlp_widen_factor,
+        max_dpr=args.max_dpr,
+        atten_drop=args.atten_drop,
+        mlp_drop=args.mlp_drop,
+        modal_prior=True).to(rank)
 
-    return pc_model, img_model
+        if args.modality != 'imc-only':
+            img_model = CrossFormer_img_mp(
+                img_height=args.img_height,
+                img_width=args.img_width,
+                patch_size=args.patch_size,
+                num_latent_channels=args.num_latent_channels,
+                num_cross_attention_layers=args.num_ca_layers,
+                num_cross_attention_heads=args.num_ca_heads,
+                num_self_attention_layers=args.num_sa_layers,
+                num_self_attention_heads=args.num_sa_heads,
+                mlp_widen_factor=args.mlp_widen_factor,
+                max_dpr=args.max_dpr,
+                atten_drop=args.atten_drop,
+                mlp_drop=args.mlp_drop,
+                modal_prior=True).to(rank)
+            return pc_model, img_model
+    else:
+        # Generic Perceiver encoder
+        pc_model = PerceiverEncoder_feats_head(
+            input_adapter=pc_input_adapter,
+            num_latents=args.num_pc_latents,  # N
+            num_latent_channels=args.num_latent_channels,  # D
+            num_cross_attention_heads=args.num_ca_heads,
+            num_cross_attention_qk_channels=pc_input_adapter.num_input_channels,  # C
+            num_cross_attention_v_channels=None,
+            num_cross_attention_layers=args.num_ca_layers,
+            first_cross_attention_layer_shared=False,
+            cross_attention_widening_factor=args.mlp_widen_factor,
+            num_self_attention_heads=args.num_sa_heads,
+            num_self_attention_qk_channels=None,
+            num_self_attention_v_channels=None,
+            num_self_attention_layers_per_block=args.num_sa_layers_per_block,
+            num_self_attention_blocks=args.num_sa_blocks,
+            first_self_attention_block_shared=True,
+            self_attention_widening_factor=args.mlp_widen_factor,
+            max_dpr=args.max_dpr,
+            atten_drop=args.atten_drop,
+            mlp_drop=args.mlp_drop).to(rank)
+
+        if args.modality != 'imc-only':
+            img_input_adapter = ImageInputAdapter(
+                image_shape=(args.img_height, args.img_width, 3),
+                num_frequency_bands=64).to(rank)
+            # Generic Perceiver encoder
+            img_model = PerceiverEncoder_feats_head(
+                input_adapter=img_input_adapter,
+                num_latents=args.num_img_latents,  # N
+                num_latent_channels=args.num_latent_channels,  # D
+                num_cross_attention_heads=args.num_ca_heads,
+                num_cross_attention_qk_channels=args.num_latent_channels,  # C
+                num_cross_attention_v_channels=None,
+                num_cross_attention_layers=args.num_ca_layers,
+                first_cross_attention_layer_shared=False,
+                cross_attention_widening_factor=args.mlp_widen_factor,
+                num_self_attention_heads=args.num_sa_heads,
+                num_self_attention_qk_channels=None,
+                num_self_attention_v_channels=None,
+                num_self_attention_layers_per_block=args.num_sa_layers_per_block,
+                num_self_attention_blocks=args.num_sa_blocks,
+                first_self_attention_block_shared=True,
+                self_attention_widening_factor=args.mlp_widen_factor,
+                max_dpr=args.max_dpr,
+                atten_drop=args.atten_drop,
+                mlp_drop=args.mlp_drop).to(rank)
+            return pc_model, img_model
+
+    return pc_model
 
 
 def build_ft_cls(rank=None):
@@ -176,7 +222,9 @@ def build_ft_cls(rank=None):
         num_self_attention_blocks=args.num_sa_blocks,
         first_self_attention_block_shared=True,
         self_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop).to(rank)
+        max_dpr=args.max_dpr,
+        atten_drop=args.atten_drop,
+        mlp_drop=args.mlp_drop).to(rank)
 
     output_adapter = ClassificationOutputAdapter(
         num_classes=args.num_obj_classes,
@@ -189,7 +237,19 @@ def build_ft_cls(rank=None):
         num_cross_attention_qk_channels=args.num_latent_channels,
         num_cross_attention_v_channels=None,
         cross_attention_widening_factor=args.mlp_widen_factor,
-        dropout=args.atten_drop).to(rank)
+        num_self_attention_heads=args.num_sa_heads,
+        num_self_attention_qk_channels=None,
+        num_self_attention_v_channels=None,
+        num_self_attention_layers_per_block=2,  # In decoder, set `num_sa_layers=2`
+        self_attention_widening_factor=args.mlp_widen_factor,
+        atten_drop=args.atten_drop,
+        mlp_drop=args.mlp_drop).to(rank)
+    # PerceiverDecoder_var doesn't show better performances than PerceiverDecoder
+    # decoder = PerceiverDecoder_var(
+    #     num_latent_channels=args.num_latent_channels,
+    #     num_classes=args.num_obj_classes,
+    #     mlp_drop=args.mlp_drop
+    # )
 
     model = PerceiverIO(encoder, decoder).to(rank)
 

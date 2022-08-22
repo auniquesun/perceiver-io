@@ -52,7 +52,7 @@ def main(rank, logger_name, log_path, log_file):
 
     setup(rank)
 
-    train_set = ShapeNetRender(transform)
+    train_set = ShapeNetRender(img_transform=transform)
     train_sampler = DistributedSampler(train_set, num_replicas=args.world_size, rank=rank)
 
     assert args.batch_size % args.world_size == 0, \
@@ -170,6 +170,7 @@ def main(rank, logger_name, log_path, log_file):
 
             with autocast():
                 pc_t1, pc_t2, imgs = pc_t1.to(rank), pc_t2.to(rank), imgs.to(rank)
+                # imgs: [B, heigth, width, channels]
                 imgs = torch.permute(imgs, (0, 2, 3, 1))
                 # data.shape: [B, N, C]
                 batch_size = pc_t1.shape[0]
@@ -234,10 +235,8 @@ def main(rank, logger_name, log_path, log_file):
             train_feats = np.array(train_feats)
             train_labels = np.array(train_labels)
 
-            # ------ LinearSVC vs. SVC
-            # The strength of regularization is inversely to C. Must be strictly positive.
-            # svm = LinearSVC(penalty='l2', loss='squared_hinge', dual=False, C=0.1, random_state=args.seed, max_iter=1000)
-            svm = SVC(C=0.1, kernel='linear')
+            # The strength of regularization is inversely to C. Must be strictly positive, default: 1.0
+            svm = SVC(C=args.svm_coff, kernel='linear')
 
             logger.write('Training SVM ...', rank=rank)
             svm.fit(train_feats, train_labels)

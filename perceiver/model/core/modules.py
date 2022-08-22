@@ -7,6 +7,7 @@ from fairscale.nn import checkpoint_wrapper
 from torch import Tensor
 
 from perceiver.model.core.utils import Sequential
+from timm.models.layers import DropPath
 
 
 class MultiHeadAttention(nn.Module):
@@ -164,7 +165,8 @@ class CrossAttentionLayer(Sequential):
         num_qk_channels: Optional[int] = None,
         num_v_channels: Optional[int] = None,
         widening_factor: int = 1,
-        dropout: float = 0.0,
+        atten_drop: float = 0.1,
+        mlp_drop: float = 0.5,
         attention_residual: bool = True,
     ):
         cross_attn = CrossAttention(
@@ -173,11 +175,12 @@ class CrossAttentionLayer(Sequential):
             num_kv_input_channels=num_kv_input_channels,
             num_qk_channels=num_qk_channels,
             num_v_channels=num_v_channels,
-            dropout=dropout,
+            dropout=atten_drop,
         )
         super().__init__(
-            Residual(cross_attn, dropout) if attention_residual else cross_attn,
-            Residual(MLP(num_q_input_channels, widening_factor), 0.5),
+            # In CrossAttentionLayer, set `drop_path_rate=0`
+            Residual(cross_attn, atten_drop, drop_path_rate=0) if attention_residual else cross_attn,
+            Residual(MLP(num_q_input_channels, widening_factor), mlp_drop, drop_path_rate=0),
         )
     # 这里前向传播函数应该是省掉了，因为继承了 Sequential
     # The forward() method of Sequential accepts any input and forwards it to the first module it contains. 
@@ -192,18 +195,20 @@ class SelfAttentionLayer(Sequential):
         num_qk_channels: Optional[int] = None,
         num_v_channels: Optional[int] = None,
         widening_factor: int = 1,
-        dropout: float = 0.0,
+        drop_path_rate: float = 0.0,
+        atten_drop: float = 0.1,
+        mlp_drop: float = 0.5,
     ):
         self_attn = SelfAttention(
             num_heads=num_heads,
             num_channels=num_channels,
             num_qk_channels=num_qk_channels,
             num_v_channels=num_v_channels,
-            dropout=dropout,
+            dropout=atten_drop,
         )
         super().__init__(
-            Residual(self_attn, dropout),
-            Residual(MLP(num_channels, widening_factor), 0.5),
+            Residual(self_attn, atten_drop, drop_path_rate),
+            Residual(MLP(num_channels, widening_factor), mlp_drop, drop_path_rate),
         )
 
 
@@ -216,9 +221,13 @@ class SelfAttentionBlock(Sequential):
         num_qk_channels: Optional[int] = None,
         num_v_channels: Optional[int] = None,
         widening_factor: int = 1,
-        dropout: float = 0.0,
+        max_dpr: float = 0.0,
+        atten_drop: float = 0.1,
+        mlp_drop: float = 0.5,
         activation_checkpointing: bool = False,
     ):
+        dpr_list = [dpr.item() for dpr in torch.linspace(0, max_dpr, num_layers-1)]
+        dpr_list.append(.0)
         layers = [
             SelfAttentionLayer(
                 num_heads=num_heads,
@@ -226,9 +235,11 @@ class SelfAttentionBlock(Sequential):
                 num_qk_channels=num_qk_channels,
                 num_v_channels=num_v_channels,
                 widening_factor=widening_factor,
-                dropout=dropout,
+                drop_path_rate=dpr_list[i],
+                atten_drop=atten_drop,
+                mlp_drop=mlp_drop
             )
-            for _ in range(num_layers)
+            for i in range(num_layers)
         ]
 
         if activation_checkpointing:
@@ -249,17 +260,17 @@ class MLP(Sequential):
 
 
 class Residual(nn.Module):
-    def __init__(self, module: nn.Module, dropout: float):
+    def __init__(self, module: nn.Module, dropout: float, drop_path_rate: float):
         super().__init__()
         self.module = module
         self.dropout = nn.Dropout(p=dropout)
-        self.dropout_p = dropout
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > .0 else nn.Identity()
 
     def forward(self, *args, **kwargs):
-        # x 是 SelfAttentionLayer 的输出
+        # x 是 SelfAttentionLayer/MLP 的输出
         x = self.module(*args, **kwargs)
         # 对 x 做dropout，再做残差连接
-        return self.dropout(x) + args[0]
+        return self.drop_path(self.dropout(x) + args[0])
 
 
 class InputAdapter(nn.Module):
@@ -338,8 +349,10 @@ class PerceiverEncoder(nn.Module):
         num_self_attention_blocks: int = 1,
         first_self_attention_block_shared: bool = True,
         self_attention_widening_factor: int = 1,
-        dropout: float = 0.0,
-        activation_checkpointing: bool = False,
+        max_dpr: float = 0.0,
+        atten_drop: float = 0.1,
+        mlp_drop: float = 0.5,
+        activation_checkpointing: bool = False
     ):
         """Generic Perceiver IO encoder.
 
@@ -397,9 +410,9 @@ class PerceiverEncoder(nn.Module):
                 num_kv_input_channels=input_adapter.num_input_channels,
                 num_qk_channels=num_cross_attention_qk_channels,
                 num_v_channels=num_cross_attention_v_channels,
-                # 理解了这个 widening_factor 的含义，就是设定Attention Layer 中MLP隐层单元，是输入channel的多少倍
                 widening_factor=cross_attention_widening_factor,
-                dropout=dropout,
+                atten_drop=atten_drop,
+                mlp_drop=mlp_drop
             )
             return checkpoint_wrapper(layer) if activation_checkpointing else layer
 
@@ -411,8 +424,10 @@ class PerceiverEncoder(nn.Module):
                 num_qk_channels=num_self_attention_qk_channels,
                 num_v_channels=num_self_attention_v_channels,
                 widening_factor=self_attention_widening_factor,
-                dropout=dropout,
-                activation_checkpointing=activation_checkpointing,
+                max_dpr=max_dpr,
+                atten_drop=atten_drop,
+                mlp_drop=mlp_drop,
+                activation_checkpointing=activation_checkpointing
             )
 
         self.cross_attn_n = cross_attn()
@@ -457,9 +472,36 @@ class PerceiverEncoder(nn.Module):
 
 
 class PerceiverEncoder_feats_head(PerceiverEncoder):
-    def __init__(self, input_adapter: InputAdapter, num_latents: int, num_latent_channels: int, num_cross_attention_heads: int = 4, num_cross_attention_qk_channels: Optional[int] = None, num_cross_attention_v_channels: Optional[int] = None, num_cross_attention_layers: int = 1, first_cross_attention_layer_shared: bool = False, cross_attention_widening_factor: int = 1, num_self_attention_heads: int = 4, num_self_attention_qk_channels: Optional[int] = None, num_self_attention_v_channels: Optional[int] = None, num_self_attention_layers_per_block: int = 6, num_self_attention_blocks: int = 1, first_self_attention_block_shared: bool = True, self_attention_widening_factor: int = 1, dropout: float = 0, activation_checkpointing: bool = False):
-        super().__init__(input_adapter, num_latents, num_latent_channels, num_cross_attention_heads, num_cross_attention_qk_channels, num_cross_attention_v_channels, num_cross_attention_layers, first_cross_attention_layer_shared, cross_attention_widening_factor, num_self_attention_heads, num_self_attention_qk_channels, num_self_attention_v_channels, num_self_attention_layers_per_block, num_self_attention_blocks, first_self_attention_block_shared, self_attention_widening_factor, dropout, activation_checkpointing)
+    def __init__(self, 
+        input_adapter: InputAdapter, 
+        num_latents: int, 
+        num_latent_channels: int, 
+        num_cross_attention_heads: int = 4, 
+        num_cross_attention_qk_channels: Optional[int] = None, 
+        num_cross_attention_v_channels: Optional[int] = None, 
+        num_cross_attention_layers: int = 1, 
+        first_cross_attention_layer_shared: bool = False, 
+        cross_attention_widening_factor: int = 1, 
+        num_self_attention_heads: int = 4, 
+        num_self_attention_qk_channels: Optional[int] = None, 
+        num_self_attention_v_channels: Optional[int] = None, 
+        num_self_attention_layers_per_block: int = 6, 
+        num_self_attention_blocks: int = 1, 
+        first_self_attention_block_shared: bool = True, 
+        self_attention_widening_factor: int = 1, 
+        max_dpr = 0.0,
+        atten_drop: float = 0.1,
+        mlp_drop: float = 0.5,
+        activation_checkpointing: bool = False):
+        super().__init__(input_adapter, num_latents, num_latent_channels, num_cross_attention_heads, num_cross_attention_qk_channels, num_cross_attention_v_channels, num_cross_attention_layers, first_cross_attention_layer_shared, cross_attention_widening_factor, num_self_attention_heads, num_self_attention_qk_channels, num_self_attention_v_channels, num_self_attention_layers_per_block, num_self_attention_blocks, first_self_attention_block_shared, self_attention_widening_factor, max_dpr, atten_drop, mlp_drop, activation_checkpointing)
 
+        # self.latent_head = nn.Sequential(
+        #     nn.LayerNorm(2*num_latent_channels), 
+        #     nn.ReLU(), 
+        #     nn.Linear(2*num_latent_channels, num_latent_channels, bias = False),
+        #     nn.LayerNorm(num_latent_channels), 
+        #     nn.ReLU(), 
+        #     nn.Linear(num_latent_channels, num_latent_channels, bias = False))
         self.latent_head = nn.Sequential(
             nn.BatchNorm1d(2*num_latent_channels), 
             nn.ReLU(), 
@@ -500,7 +542,13 @@ class PerceiverDecoder(nn.Module):
         num_cross_attention_qk_channels: Optional[int] = None,
         num_cross_attention_v_channels: Optional[int] = None,
         cross_attention_widening_factor: int = 1,
-        dropout: float = 0.0,
+        num_self_attention_heads: int = 4,
+        num_self_attention_qk_channels: Optional[int] = None,
+        num_self_attention_v_channels: Optional[int] = None,
+        num_self_attention_layers_per_block: int = 2,
+        self_attention_widening_factor: int = 1,
+        atten_drop: float = 0.0,
+        mlp_drop: float = 0.0,
         activation_checkpointing: bool = False,
     ):
         """Generic Perceiver IO decoder.
@@ -527,13 +575,28 @@ class PerceiverDecoder(nn.Module):
             num_qk_channels=num_cross_attention_qk_channels,
             num_v_channels=num_cross_attention_v_channels,
             widening_factor=cross_attention_widening_factor,
-            dropout=dropout,
+            atten_drop=atten_drop,
+            mlp_drop=mlp_drop,
         )
+
+        self_attn = SelfAttentionBlock(
+                num_layers=num_self_attention_layers_per_block,
+                num_heads=num_self_attention_heads,
+                num_channels=num_latent_channels,
+                num_qk_channels=num_self_attention_qk_channels,
+                num_v_channels=num_self_attention_v_channels,
+                widening_factor=self_attention_widening_factor,
+                max_dpr=0,  # In decoder's SA block, don't use DropPath
+                atten_drop=atten_drop,
+                mlp_drop=mlp_drop,
+                activation_checkpointing=activation_checkpointing
+            )
 
         if activation_checkpointing:
             cross_attn = checkpoint_wrapper(cross_attn)
 
         self.cross_attn = cross_attn
+        self.self_attn = self_attn
         self.output_adapter = output_adapter
 
     def forward(self, x):
@@ -541,14 +604,50 @@ class PerceiverDecoder(nn.Module):
                 1. output query array
                 2. latent key array
                 3. latent value array
-            2和3其实从同一latent array而来
+            2和3其实从同一latent array而来，就是encoder的输出
         '''
-        # output_query: [batch_size, num_output_queries=1, num_output_query_channels]
+        # output_query: [batch_size, num_output_queries=1, num_output_query_channels=num_latent_channels]
         output_query = self.output_adapter.output_query(x)
         # output: [batch_size, num_output_queries=1, num_output_query_channels]
-        output = self.cross_attn(output_query, x)
+        x_latent = self.cross_attn(output_query, x)
+        output = self.self_attn(x_latent)
         # output: [batch_size, num_classes]
         return self.output_adapter(output)
+
+
+class PerceiverDecoder_var(nn.Module):
+    def __init__(
+        self,
+        num_latent_channels: int,
+        num_classes: int = 40, 
+        mlp_drop: float = 0.0,
+    ):
+        super().__init__()
+
+        self.decoder = nn.Sequential(
+            nn.Linear(num_latent_channels * 2, num_latent_channels),
+            nn.BatchNorm1d(num_latent_channels),    # 值得借鉴
+            nn.ReLU(inplace=True),
+            nn.Dropout(mlp_drop),
+            nn.Linear(num_latent_channels, num_latent_channels),
+            nn.BatchNorm1d(num_latent_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(mlp_drop),
+            nn.Linear(num_latent_channels, num_classes)
+        )
+
+    def forward(self, x):
+        '''
+            Args:
+                x: [batch, num_latents, num_latent_channels]
+
+        '''
+        # output_query: [batch_size, num_output_queries=1, num_output_query_channels=num_latent_channels]
+        backbone_feats = torch.cat([x.max(1)[0], x.mean(1)], dim=1)
+        # output: [batch_size, num_classes]
+        output = self.decoder(backbone_feats)
+
+        return output
 
 
 class PerceiverIO(Sequential):
