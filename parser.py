@@ -127,7 +127,7 @@ parser.add_argument('--rank', type=int, default=0, help='the rank for current GP
 parser.add_argument('--backend', type=str, default='nccl', help='DDP communication backend')
 parser.add_argument('--world_size', type=int, default=6, help='number of GPUs')
 parser.add_argument('--master_addr', type=str, default='localhost', help='ip of master node')
-parser.add_argument('--master_port', type=str, default='12355', help='port of master node')
+parser.add_argument('--master_port', type=str, default='12395', help='port of master node')
 
 parser.add_argument('--pt_dataset', type=str, default='ModelNet40', help='the dataset used for '
                     'evaluating the pretrained model')

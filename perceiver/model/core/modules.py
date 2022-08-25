@@ -226,8 +226,7 @@ class SelfAttentionBlock(Sequential):
         mlp_drop: float = 0.5,
         activation_checkpointing: bool = False,
     ):
-        dpr_list = [dpr.item() for dpr in torch.linspace(0, max_dpr, num_layers-1)]
-        dpr_list.append(.0)
+        dpr_list = [dpr.item() for dpr in torch.linspace(0, max_dpr, num_layers)]
         layers = [
             SelfAttentionLayer(
                 num_heads=num_heads,
@@ -625,16 +624,15 @@ class PerceiverDecoder_var(nn.Module):
         super().__init__()
 
         self.decoder = nn.Sequential(
-            nn.Linear(num_latent_channels * 2, num_latent_channels),
-            nn.BatchNorm1d(num_latent_channels),    # 值得借鉴
-            nn.ReLU(inplace=True),
-            nn.Dropout(mlp_drop),
-            nn.Linear(num_latent_channels, num_latent_channels),
+            nn.BatchNorm1d(2*num_latent_channels),
+            nn.ReLU(),
+            nn.Linear(2*num_latent_channels, num_latent_channels),
             nn.BatchNorm1d(num_latent_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(mlp_drop),
-            nn.Linear(num_latent_channels, num_classes)
-        )
+            nn.ReLU(),
+            nn.Linear(num_latent_channels, num_latent_channels//2),
+            nn.BatchNorm1d(num_latent_channels//2),
+            nn.ReLU(),
+            nn.Linear(num_latent_channels//2, num_classes))
 
     def forward(self, x):
         '''
@@ -648,7 +646,7 @@ class PerceiverDecoder_var(nn.Module):
         output = self.decoder(backbone_feats)
 
         return output
-
+        
 
 class PerceiverIO(Sequential):
     ''' 父类是Sequential，前向传播就是按顺序

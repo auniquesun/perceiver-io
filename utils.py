@@ -13,7 +13,7 @@ from perceiver.model.core import PerceiverEncoder, PerceiverEncoder_feats_head
 from perceiver.model.core import PerceiverDecoder, PerceiverIO, ClassificationOutputAdapter
 from perceiver.model.image import ImageInputAdapter
 from perceiver.model.pointcloud import PointCloudInputAdapter, CrossFormer_partseg, CrossFormer_semseg
-from perceiver.model.pointcloud import CrossFormer_pc_mp, CrossFormer_img_mp
+from perceiver.model.pointcloud import CrossFormer_pc_mp, CrossFormer_img_mp, CrossFormer_pc_mp_ft
 
 import torchvision.transforms as transforms
 
@@ -112,8 +112,8 @@ def build_model(rank=None):
             which will pretrain on a selected dataset
     '''
     pc_input_adapter = PointCloudInputAdapter(
-    pointcloud_shape=(args.num_pt_points, args.point_channels),
-    num_input_channels=args.num_latent_channels).to(rank)
+        pointcloud_shape=(args.num_pt_points, args.point_channels),
+        num_input_channels=args.num_latent_channels).to(rank)
 
     if args.mp:
         pc_model = CrossFormer_pc_mp(input_adapter=pc_input_adapter,
@@ -205,53 +205,70 @@ def build_ft_cls(rank=None):
     input_adapter = PointCloudInputAdapter(
         pointcloud_shape=(args.num_pt_points, args.point_channels),
         num_input_channels=args.num_latent_channels).to(rank)
-    encoder = PerceiverEncoder(
-        input_adapter=input_adapter,
-        num_latents=args.num_pc_latents,  # N
-        num_latent_channels=args.num_latent_channels,  # D
-        num_cross_attention_heads=args.num_ca_heads,
-        num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
-        num_cross_attention_v_channels=None,
-        num_cross_attention_layers=args.num_ca_layers,
-        first_cross_attention_layer_shared=False,
-        cross_attention_widening_factor=args.mlp_widen_factor,
-        num_self_attention_heads=args.num_sa_heads,
-        num_self_attention_qk_channels=None,
-        num_self_attention_v_channels=None,
-        num_self_attention_layers_per_block=args.num_sa_layers_per_block,
-        num_self_attention_blocks=args.num_sa_blocks,
-        first_self_attention_block_shared=True,
-        self_attention_widening_factor=args.mlp_widen_factor,
-        max_dpr=args.max_dpr,
-        atten_drop=args.atten_drop,
-        mlp_drop=args.mlp_drop).to(rank)
+    if args.mp:
+        model = CrossFormer_pc_mp_ft(
+            input_adapter=input_adapter,
+            num_latents=args.num_pc_latents,
+            num_latent_channels=args.num_latent_channels,
+            group_size=args.group_size,
+            num_cross_attention_layers=args.num_ca_layers,
+            num_cross_attention_heads=args.num_ca_heads,
+            num_self_attention_layers=args.num_sa_layers,
+            num_self_attention_heads=args.num_sa_heads,
+            mlp_widen_factor=args.mlp_widen_factor,
+            max_dpr=args.max_dpr,
+            atten_drop=args.atten_drop,
+            mlp_drop=args.mlp_drop,
+            modal_prior=True,
+            num_obj_classes=args.num_obj_classes).to(rank)
+    else:
+        encoder = PerceiverEncoder(
+            input_adapter=input_adapter,
+            num_latents=args.num_pc_latents,  # N
+            num_latent_channels=args.num_latent_channels,  # D
+            num_cross_attention_heads=args.num_ca_heads,
+            num_cross_attention_qk_channels=input_adapter.num_input_channels,  # C
+            num_cross_attention_v_channels=None,
+            num_cross_attention_layers=args.num_ca_layers,
+            first_cross_attention_layer_shared=False,
+            cross_attention_widening_factor=args.mlp_widen_factor,
+            num_self_attention_heads=args.num_sa_heads,
+            num_self_attention_qk_channels=None,
+            num_self_attention_v_channels=None,
+            num_self_attention_layers_per_block=args.num_sa_layers_per_block,
+            num_self_attention_blocks=args.num_sa_blocks,
+            first_self_attention_block_shared=True,
+            self_attention_widening_factor=args.mlp_widen_factor,
+            max_dpr=args.max_dpr,
+            atten_drop=args.atten_drop,
+            mlp_drop=args.mlp_drop).to(rank)
 
-    output_adapter = ClassificationOutputAdapter(
-        num_classes=args.num_obj_classes,
-        num_output_queries=args.output_seq_length,
-        num_output_query_channels=args.num_latent_channels).to(rank)
-    decoder = PerceiverDecoder(
-        output_adapter=output_adapter,
-        num_latent_channels=args.num_latent_channels,  # D
-        num_cross_attention_heads=args.num_ca_heads,
-        num_cross_attention_qk_channels=args.num_latent_channels,
-        num_cross_attention_v_channels=None,
-        cross_attention_widening_factor=args.mlp_widen_factor,
-        num_self_attention_heads=args.num_sa_heads,
-        num_self_attention_qk_channels=None,
-        num_self_attention_v_channels=None,
-        num_self_attention_layers_per_block=2,  # In decoder, set `num_sa_layers=2`
-        self_attention_widening_factor=args.mlp_widen_factor,
-        atten_drop=args.atten_drop,
-        mlp_drop=args.mlp_drop).to(rank)
-    # PerceiverDecoder_var doesn't show better performances than PerceiverDecoder
-    # decoder = PerceiverDecoder_var(
-    #     num_latent_channels=args.num_latent_channels,
-    #     num_classes=args.num_obj_classes,
-    #     mlp_drop=args.mlp_drop
-    # )
+        output_adapter = ClassificationOutputAdapter(
+            num_classes=args.num_obj_classes,
+            num_output_queries=args.output_seq_length,
+            num_output_query_channels=args.num_latent_channels).to(rank)
+        decoder = PerceiverDecoder(
+            output_adapter=output_adapter,
+            num_latent_channels=args.num_latent_channels,  # D
+            num_cross_attention_heads=args.num_ca_heads,
+            num_cross_attention_qk_channels=args.num_latent_channels,
+            num_cross_attention_v_channels=None,
+            cross_attention_widening_factor=args.mlp_widen_factor,
+            num_self_attention_heads=args.num_sa_heads,
+            num_self_attention_qk_channels=None,
+            num_self_attention_v_channels=None,
+            num_self_attention_layers_per_block=2,  # In decoder, set `num_sa_layers=2`
+            self_attention_widening_factor=args.mlp_widen_factor,
+            atten_drop=args.atten_drop,
+            mlp_drop=args.mlp_drop).to(rank)
+        # PerceiverDecoder_var doesn't show better performances than PerceiverDecoder
+        # decoder = PerceiverDecoder_var(
+        #     num_latent_channels=args.num_latent_channels,
+        #     num_classes=args.num_obj_classes,
+        #     mlp_drop=args.mlp_drop
+        # )
 
-    model = PerceiverIO(encoder, decoder).to(rank)
+        model = PerceiverIO(encoder, decoder).to(rank)
 
     return model
 
@@ -321,7 +338,10 @@ def init(proj_name, exp_name, main_program, model_name):
     if 'seg.py' in main_program:    # ft_partseg.py, ft_semseg.py
         shutil.copy(f'perceiver/model/pointcloud/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     else:
-        shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
+        if args.mp:
+            shutil.copy(f'perceiver/model/pointcloud/partseg.py', os.path.join('runs', proj_name, exp_name, 'files'))
+        else:
+            shutil.copy(f'perceiver/model/core/{model_name}', os.path.join('runs', proj_name, exp_name, 'files'))
     shutil.copy('utils.py', os.path.join('runs', proj_name, exp_name, 'files'))
     
     # to fix BlockingIOError: [Errno 11]

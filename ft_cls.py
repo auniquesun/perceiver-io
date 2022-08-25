@@ -84,7 +84,7 @@ def main(rank, logger_name, log_path, log_file):
         drop_last=False)
 
     model = build_ft_cls(rank=rank)
-    model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=False)
+    model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # ----- load pretrained model
     assert args.resume, 'Finetuning Perceiver requires pretrained model weights'

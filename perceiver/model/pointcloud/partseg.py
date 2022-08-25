@@ -531,7 +531,6 @@ class CrossFormer_pc_mp(nn.Module):
             Return:
                 x_latent: [batch, num_points, num_part_classes]
         '''
-        B, N, _ = pts.shape
         # encode each input point -> pts_embs: [batch, num_points, num_latent_channels]
         pts_embs = self.input_adapter(pts)
 
@@ -549,6 +548,61 @@ class CrossFormer_pc_mp(nn.Module):
         x_latent_feats = self.latent_head(backbone_feats)
 
         return x_latent_feats, backbone_feats
+
+
+class CrossFormer_pc_mp_ft(CrossFormer_pc_mp):
+    def __init__(self, 
+        input_adapter=None, 
+        num_latents=128, 
+        num_latent_channels=384, 
+        group_size=32, 
+        num_cross_attention_layers=1, 
+        num_cross_attention_heads=6, 
+        num_self_attention_layers=6, 
+        num_self_attention_heads=6, 
+        mlp_widen_factor=4, 
+        max_dpr=0, 
+        atten_drop=0.1, 
+        mlp_drop=0.5, 
+        modal_prior=True,
+        num_obj_classes=40):
+        super().__init__(input_adapter, num_latents, num_latent_channels, group_size, num_cross_attention_layers, num_cross_attention_heads, num_self_attention_layers, num_self_attention_heads, mlp_widen_factor, max_dpr, atten_drop, mlp_drop, modal_prior)
+
+        self.finetune_head = nn.Sequential(
+            nn.BatchNorm1d(2*num_latent_channels),
+            nn.ReLU(),
+            nn.Linear(2*num_latent_channels, num_latent_channels),
+            nn.BatchNorm1d(num_latent_channels),
+            nn.ReLU(),
+            nn.Linear(num_latent_channels, num_latent_channels//2),
+            nn.BatchNorm1d(num_latent_channels//2),
+            nn.ReLU(),
+            nn.Linear(num_latent_channels//2, num_obj_classes))
+
+    def forward(self, pts):
+        '''
+            Args:
+                pts: [batch, num_points, 3]
+            Return:
+                output: [batch, num_obj_classes]
+        '''
+        # encode each input point -> pts_embs: [batch, num_points, num_latent_channels]
+        pts_embs = self.input_adapter(pts)
+
+        # neighborhood: [batch, num_groups, group_size, 3]    center: [batch, num_groups, 3]
+        neighborhood, center = divide_patches(pts, self.num_groups, self.group_size)
+        # group_embs: [batch, num_groups, num_latent_channels]
+        group_embs = self.group2emb(neighborhood)
+        # pos_embs: [batch, num_groups, num_latent_channels]
+        pos_embs = self.position_emb(center)
+
+        # x_latent: [batch, num_groups, dim_model]
+        x_latent = self.encoder(group_embs, pos_embs, pts_embs)
+        # backbone_feats: [batch, 2*dim_model]
+        backbone_feats = torch.cat([x_latent.max(1)[0], x_latent.mean(1)], dim=1)
+
+        output = self.finetune_head(backbone_feats)
+        return output
 
 
 class CrossFormer_img_mp(nn.Module):

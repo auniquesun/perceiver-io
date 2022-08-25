@@ -12,6 +12,13 @@ from utils import build_model
 from parser import args
 
 
+print(f'====== Fewshot evaluation on {args.ft_dataset} ======')
+print(f'------ n_runs: {args.n_runs}')
+print(f'------ k_way: {args.k_way}')
+print(f'------ n_shot: {args.n_shot}')
+print(f'------ n_query: {args.n_query}')
+
+
 device = torch.device("cuda:%d" % args.rank)
 model, _ = build_model()
 model = model.to(device)
@@ -71,8 +78,9 @@ for run in tqdm(range(args.n_runs)):
         label = int(label_support[i])
         data = data.to(device)
         with torch.no_grad():
-            feat = model(data)
-        feat = feat.detach().cpu().numpy().tolist()
+            ''' # NOTE: use model `backbone_feats` '''
+            feat = model(data)[1]
+        feat = feat.tolist()
         feats_train.append(feat)
         labels_train.append(label)
 
@@ -80,8 +88,6 @@ for run in tqdm(range(args.n_runs)):
     # squeeze the dimension whose value is 1
     feats_train = np.squeeze(feats_train)
     labels_train = np.array(labels_train)
-    # print('------ feats_train.shape:', feats_train.shape)
-    # print('------ labels_train.shape:', labels_train.shape)
 
     feats_test = []
     labels_test = []
@@ -90,8 +96,9 @@ for run in tqdm(range(args.n_runs)):
         label = int(label_query[i])
         data = data.to(device)
         with torch.no_grad():
-            feat = model(data)
-        feat = feat.detach().cpu().numpy().tolist()
+            ''' # NOTE: use model `backbone_feats` '''
+            feat = model(data)[1]
+        feat = feat.tolist()
         feats_test.append(feat)
         labels_test.append(label)
 
@@ -99,14 +106,12 @@ for run in tqdm(range(args.n_runs)):
     # squeeze the dimension whose value is 1
     feats_test = np.squeeze(feats_test)
     labels_test = np.array(labels_test)
-    # print('------ feats_test.shape:', feats_test.shape)
-    # print('------ labels_test.shape:', labels_test.shape)
 
     # scaler = MinMaxScaler()
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(feats_train)
-    model_tl = SVC(kernel ='linear')
-    model_tl.fit(scaled, labels_train)
+    train_scaled = scaler.fit_transform(feats_train)
+    model_tl = SVC(C=args.svm_coff, kernel='linear')
+    model_tl.fit(train_scaled, labels_train)
     
     test_scaled = scaler.transform(feats_test)
     accuracy = model_tl.score(test_scaled, labels_test) * 100
@@ -114,5 +119,5 @@ for run in tqdm(range(args.n_runs)):
 
     # print(f"C = {c} : {model_tl.score(test_scaled, labels_test)}")
     # print(f"Run - {run + 1} : {accuracy}")
-    
-print(f'{np.mean(acc)} +/- {np.std(acc)}')
+
+print(f'------ Acc: {np.mean(acc)} +/- {np.std(acc)}\n')
