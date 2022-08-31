@@ -119,17 +119,17 @@ from parser import args
 #                     pin_memory=True,
 #                     drop_last=False)
 # print('len(train_loader):', len(train_loader))
-# # print('seg_num_all:', train_loader.dataset.seg_num_all)
-# # print('seg_start_index:', train_loader.dataset.seg_start_index)
+# print('seg_num_all:', train_loader.dataset.seg_num_all)
+# print('seg_start_index:', train_loader.dataset.seg_start_index)
 
 # num_part_classes = 50
 # part2count = dict()
 # total = 0
 # for i, (points, cls_label, seg_label) in enumerate(train_loader):
-# #     print('points:', points.shape)
-# #     print('cls_label:', cls_label.shape)
-# #     print('seg_label:', seg_label.shape)
-# #     break
+#     print('points:', points.shape)
+#     print('cls_label:', cls_label.shape)
+#     print('seg_label:', seg_label.shape)
+#     break
 #         for j in range(num_part_classes):
 #             if j not in part2count.keys():
 #                 part2count[j] = 0
@@ -273,16 +273,14 @@ from parser import args
 # print('output.shape:', output.shape)
 
 # ----------- partseg model
-# from perceiver.model.pointcloud.partseg import CrossFormer
+# from perceiver.model.pointcloud.partseg import CrossFormer_partseg
 # from torch.nn import CrossEntropyLoss
 
 # input_adapter = PointCloudInputAdapter(
 #         pointcloud_shape=(2048, 3),
-#         num_input_channels=384,
-#         num_groups=128,
-#         group_size=32)
+#         num_input_channels=384)
 
-# model = CrossFormer(
+# model = CrossFormer_partseg(
 #         input_adapter=input_adapter,
 #         num_latents=128,
 #         num_latent_channels=384,
@@ -300,52 +298,63 @@ from parser import args
 #         )
 # criterion = CrossEntropyLoss()
 
-# points = torch.randn(30, 2048, 3)
-# obj_cls_labels = torch.randn(30, 16)
-# output = model(points, obj_cls_labels)
-# target = torch.randint(0, 50, (30,2048))
-# loss = criterion(output.reshape(-1, 50), target.reshape(-1))
+# n_partseg = sum(p.numel() for p in model.parameters() if p.requires_grad)
+# print('parameters:', n_partseg)
+# # >>> parameters: 26,769,074
 
+# points = torch.randn(2, 2048, 3)
+# obj_cls_labels = torch.randn(2, 16)
+# # output = model(points, obj_cls_labels)
+# point_flops = FlopCountAnalysis(model, (points, obj_cls_labels))
+# print('point_flops:', point_flops.total())
+# # >>> point_flops: 30,291,621,072.0 / 2
+
+# target = torch.randint(0, 50, (2,2048))
+# loss = criterion(output.reshape(-1, 50), target.reshape(-1))
 # print('output.shape:', output.shape)
 # print('loss:', loss.item())
-
 # print(args.layer_idx)
 
 
 # ----------- semseg model
-# from perceiver.model.pointcloud.semseg import CrossFormer_semseg
-# from torch.nn import CrossEntropyLoss
+from perceiver.model.pointcloud.semseg import CrossFormer_semseg
+from torch.nn import CrossEntropyLoss
 
-# input_adapter = PointCloudInputAdapter(
-#         pointcloud_shape=(2048, 6),
-#         num_input_channels=384,
-#         num_groups=128,
-#         group_size=32)
+input_adapter = PointCloudInputAdapter(
+        pointcloud_shape=(2048, 6),
+        num_input_channels=384)
 
-# model = CrossFormer_semseg(
-#         input_adapter=input_adapter,
-#         point_channels=6,
-#         num_latents=128,
-#         num_latent_channels=384,
-#         group_size=32,
-#         num_cross_attention_layers=1,
-#         num_cross_attention_heads=6,
-#         num_self_attention_layers=11,
-#         num_self_attention_heads=6,
-#         mlp_widen_factor=4,
-#         max_dpr=0.1,
-#         atten_drop=.0,
-#         mlp_drop=.0,
-#         layer_idx=[3,7,11],
-#         num_obj_classes=13
-#         )
-# criterion = CrossEntropyLoss()
+model = CrossFormer_semseg(
+        input_adapter=input_adapter,
+        point_channels=6,
+        num_latents=128,
+        num_latent_channels=384,
+        group_size=32,
+        num_cross_attention_layers=1,
+        num_cross_attention_heads=6,
+        num_self_attention_layers=11,
+        num_self_attention_heads=6,
+        mlp_widen_factor=4,
+        max_dpr=0.1,
+        atten_drop=.0,
+        mlp_drop=.0,
+        layer_idx=[3,7,11],
+        num_obj_classes=13
+        )
 
-# points = torch.randn(10, 2048, 6)
+n_semseg = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print('parameters:', n_semseg)
+# # >>> parameters: 26,727,565
+
+points = torch.randn(2, 2048, 6)
+point_flops = FlopCountAnalysis(model, points)
+print('point_flops:', point_flops.total())
+# >>> point_flops: 30,291,621,072.0 / 2
+
 # output = model(points)
 # target = torch.randint(0, 13, (10,2048))
+# criterion = CrossEntropyLoss()
 # loss = criterion(output.reshape(-1, 13), target.reshape(-1))
-
 # print('output.shape:', output.shape)
 # print('loss:', loss.item())
 
@@ -363,14 +372,14 @@ from parser import args
 
 
 # ------ CrossFormer_pc_mp_ft
-from perceiver.model.pointcloud import CrossFormer_pc_mp_ft
+# from perceiver.model.pointcloud import CrossFormer_pc_mp_ft
 
-input_adapter = PointCloudInputAdapter(
-    pointcloud_shape=(1024, 3),
-    num_input_channels=384)
-model = CrossFormer_pc_mp_ft(input_adapter=input_adapter, num_latents=96, mlp_widen_factor=2)
+# input_adapter = PointCloudInputAdapter(
+#     pointcloud_shape=(1024, 3),
+#     num_input_channels=384)
+# model = CrossFormer_pc_mp_ft(input_adapter=input_adapter, num_latents=96, mlp_widen_factor=2)
 
-input = torch.randn(2, 1024, 3)
-output = model(input)
+# input = torch.randn(2, 1024, 3)
+# output = model(input)
 
-print('output.shape:', output.shape)
+# print('output.shape:', output.shape)

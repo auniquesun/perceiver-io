@@ -68,6 +68,8 @@ def main(rank, logger_name, log_path, log_file):
         pin_memory=True,
         drop_last=False)
 
+    logger.write(f'len(train_loader): {len(train_loader)}', rank=rank)
+
     # here set `num_workers=0` because ModelNet40 has much less samples than ShapeNet 
     #   thus smaller len(train_val_loader) and len(test_val_loader)
     if args.pt_dataset == 'ModelNet40':
@@ -160,11 +162,14 @@ def main(rank, logger_name, log_path, log_file):
             img_model_ddp.train()
         train_sampler.set_epoch(epoch)
 
+        pc_duration_per_epoch = AverageMeter()
+        img_duration_per_epoch = AverageMeter()
         # average losses across all scanned batches within an epoch
         train_imid_loss = AverageMeter()
         train_cmid_loss = AverageMeter()
         train_loss = AverageMeter()
 
+        start_train = datetime.now()
         for i, ((pc_t1, pc_t2), imgs) in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
@@ -177,7 +182,10 @@ def main(rank, logger_name, log_path, log_file):
 
                 pc = torch.cat([pc_t1, pc_t2], dim=0)
                 # pc_model_ddp(pc)[0] is the features with the projection head
+                pc_time_start = datetime.now()
                 pc_feats = pc_model_ddp(pc)[0]
+                duration = datetime.now() - pc_time_start
+                pc_duration_per_epoch.update(duration.total_seconds())
                 pc_t1_feats = pc_feats[:batch_size, :]
                 pc_t2_feats = pc_feats[batch_size:, :]
 
@@ -187,7 +195,10 @@ def main(rank, logger_name, log_path, log_file):
                     elif args.modality == 'both':
                         loss_imid = criterion(pc_t1_feats, pc_t2_feats)
                     pc_feats = (pc_t1_feats + pc_t2_feats) / 2
+                    img_time_start = datetime.now()
                     img_feats = img_model_ddp(imgs)[0]
+                    duration = datetime.now() - img_time_start
+                    img_duration_per_epoch.update(duration.total_seconds())
                     loss_cmid = criterion(pc_feats, img_feats)
                 else:
                     loss_imid = criterion(pc_t1_feats, pc_t2_feats)
@@ -211,6 +222,7 @@ def main(rank, logger_name, log_path, log_file):
                 logger.write(f'Epoch: {epoch}/{args.epochs}, Batch: {i}/{len(train_loader)}, '
                              f'<{args.modality}> Loss IMID: {train_imid_loss.avg}, Loss CMID: {train_cmid_loss.avg} '
                              f'Loss Total: {train_loss.avg}', rank=rank)
+        train_duration = datetime.now() - start_train
 
         # ------ Test
         with torch.no_grad():   # it will disable gradients computation and save memory
@@ -221,6 +233,7 @@ def main(rank, logger_name, log_path, log_file):
             train_feats = []
             train_labels = []
 
+            test_start = datetime.now()
             for i, (data, label) in enumerate(train_val_loader):
                 if args.pt_dataset == "ModelNet40":
                     labels = list(map(lambda x: x[0],label.tolist()))
@@ -260,6 +273,7 @@ def main(rank, logger_name, log_path, log_file):
 
             logger.write('Testing SVM ...', rank=rank)
             test_acc = svm.score(test_feats, test_labels)
+            test_duration = datetime.now() - test_start
 
             if rank == 0:
                 logger.write(f'Test Accuracy of SVM: {test_acc}', rank=rank)
@@ -287,6 +301,10 @@ def main(rank, logger_name, log_path, log_file):
                 wandb_log['Pretrain CMID Loss'] = train_cmid_loss.avg
                 wandb_log['svm_test_acc'] = test_acc
                 wandb_log['svm_best_acc'] = best_test_acc
+                wandb_log['Pre-train_test_time_per_epoch'] = test_duration.total_seconds()
+                wandb_log['Pre-train_time_per_epoch'] = train_duration.total_seconds()
+                wandb_log['pc_duration_per_epoch'] = pc_duration_per_epoch.sum / 2
+                wandb_log['img_duration_per_epoch'] = img_duration_per_epoch.sum
                 wandb.log(wandb_log)
 
             # adjust learning rate before a new epoch

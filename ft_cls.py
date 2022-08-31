@@ -159,6 +159,7 @@ def main(rank, logger_name, log_path, log_file):
         train_loss = AverageMeter()
         acc_meter = AccuracyMeter()
 
+        start_train = datetime.now()
         for i, (points,label) in enumerate(train_loader):
             optimizer.zero_grad(set_to_none=True)
 
@@ -168,8 +169,8 @@ def main(rank, logger_name, log_path, log_file):
                 points = points.to(rank)
                 label = label.to(rank)
 
-                # NOTE: here `loss` has already been averaged by `batch_size`
                 pred_classes = model_ddp(points)
+                # NOTE: here `loss` has already been averaged by `batch_size`
                 # ------ ref: https://pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html
                 #           The `pred_classes` is expected to contain `raw`, `unnormalized` scores for each class
                 #           label.squeeze() is a `batch_size`-Dimension class index tensor
@@ -188,6 +189,7 @@ def main(rank, logger_name, log_path, log_file):
             if i % args.print_freq == 0:
                 logger.write(f'Epoch: {epoch}/{args.epochs}, Batch: {i}/{len(train_loader)}, '
                              f'Loss: {loss.item()}, Acc: {pos.item()/batch_size}', rank=rank)
+        train_duration = datetime.now() - start_train
 
         # ------ Test
         with torch.no_grad():
@@ -195,7 +197,9 @@ def main(rank, logger_name, log_path, log_file):
 
             logger.write('Start testing on the %s test set ...' % args.ft_dataset, rank=rank)
             
+            test_start = datetime.now()
             ft_test_loss, ft_test_acc = test(rank, test_loader, model_ddp, criterion)
+            test_duration = datetime.now() - test_start
 
             logger.write(f'Test on {args.ft_dataset}, Epoch: {epoch}/{args.epochs}, Acc: {ft_test_acc}, Loss: {ft_test_loss}', rank=rank)
 
@@ -220,6 +224,8 @@ def main(rank, logger_name, log_path, log_file):
                 wandb_log['ft_test_loss'] = ft_test_loss
                 wandb_log['ft_test_acc'] = ft_test_acc
                 wandb_log['ft_test_best_acc'] = ft_test_best_acc
+                wandb_log['test_time_per_epoch'] = test_duration.total_seconds()
+                wandb_log['train_time_per_epoch'] = train_duration.total_seconds()
                 wandb.log(wandb_log)
 
             # adjust learning rate before a new epoch
