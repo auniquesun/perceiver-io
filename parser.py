@@ -127,7 +127,7 @@ parser.add_argument('--rank', type=int, default=0, help='the rank for current GP
 parser.add_argument('--backend', type=str, default='nccl', help='DDP communication backend')
 parser.add_argument('--world_size', type=int, default=6, help='number of GPUs')
 parser.add_argument('--master_addr', type=str, default='localhost', help='ip of master node')
-parser.add_argument('--master_port', type=str, default='12395', help='port of master node')
+parser.add_argument('--master_port', type=str, default='12355', help='port of master node')
 
 parser.add_argument('--pt_dataset', type=str, default='ModelNet40', help='the dataset used for '
                     'evaluating the pretrained model')
@@ -141,6 +141,8 @@ parser.add_argument('--class_choice', type=str, default=None, metavar='N',
                     choices=['Airplane', 'Bag', 'Cap', 'Car', 'Chair',
                                 'Earphone', 'Guitar', 'Knife', 'Lamp', 'Laptop', 
                                 'Motor', 'Mug', 'Pistol', 'Rocket', 'Skateboard', 'Table'])
+# specify which area in s3dis to be evaluated
+parser.add_argument('--test_area', type=int, default=5, help='specify which area in s3dis to be evaluated')
 parser.add_argument('--ballradius', type=int, default=10, help='ballradius')
 parser.add_argument('--svm_coff', type=float, default=1.0, help='linear_svm coefficient')
 

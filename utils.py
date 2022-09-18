@@ -24,6 +24,7 @@ transform = transforms.Compose([transforms.Resize((args.img_height, args.img_wid
                                 transforms.ToTensor(), 
                                 transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
 # shapenetpart: 16 object classes, 50 parts
+# NOTE do not use these weights, otherwise the model performance will degrade significantly
 shapenetpart_part_weights = [0.0756, 0.0547, 0.0214, 0.0160, 0.0003, 0.0041, 0.0023, 0.0008, 
                 0.0028, 0.0038, 0.0085, 0.0378, 0.0742, 0.0900, 0.0466, 0.0073, 0.0024, 0.0010, 
                 0.0005, 0.0039, 0.0087, 0.0323, 0.0113, 0.0109, 0.0148, 0.0537, 0.0011, 0.0204, 

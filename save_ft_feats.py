@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from datasets.data import ModelNet40SVM, ScanObjectNNSVM
-from utils import build_model
+from utils import build_ft_cls
 from parser import args
 
 
@@ -19,8 +19,8 @@ elif args.pt_dataset == "ScanObjectNN":
         batch_size=args.test_batch_size, shuffle=True)
 
 device = torch.device('cuda:0')
-# build_model 是预训练模型
-model = build_model(rank=device)
+# build_ft_cls 是预训练模型，设成 imc-only，只加载点云模型
+model = build_ft_cls(rank=device)
 
 save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', args.pc_model_file)
 state_dict = torch.load(save_path)
@@ -41,15 +41,15 @@ with torch.no_grad():
         elif args.pt_dataset == "ScanObjectNN":
             labels = label.tolist()
         data = data.to(device)
-        # model(data)[1] is the features output by CrossFormer backbone
-        feats = model(data)[1].tolist()
+        # model(data) is predicted class distribution
+        feats = model(data).tolist()
         feats_test.extend(feats)
         labels_test.extend(labels)
     print('Forward done!')
 
     state_dict = {'feats_test': np.array(feats_test), 'labels_test': np.array(labels_test)}
     if args.pt_dataset == "ModelNet40":
-        torch.save(state_dict, 'visualization/pt_MN_test_feats_labels.pth')
+        torch.save(state_dict, 'visualization/ft_MN_test_feats_labels.pth')
     else:
-        torch.save(state_dict, 'visualization/pt_SO_test_feats_labels.pth')
+        torch.save(state_dict, 'visualization/ft_SO_test_feats_labels.pth')
     print('Save done!')

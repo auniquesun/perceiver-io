@@ -8,7 +8,7 @@ from datasets.data import *
 from sklearn.svm import SVC
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
 
-from utils import build_model
+from utils import build_model, build_ft_cls
 from parser import args
 
 
@@ -20,10 +20,13 @@ print(f'------ n_query: {args.n_query}')
 
 
 device = torch.device("cuda:%d" % args.rank)
-model, _ = build_model()
+# ------ 1. used finetuned model
+# model = build_ft_cls()
+# ------ 2. used pretrained model
+model = build_model()
 model = model.to(device)
 
-save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'pc_model_best.pth')
+save_path = os.path.join('runs', args.proj_name, args.exp_name, 'models', 'model_best.pth')
 state_dict = torch.load(save_path)
 model.load_state_dict(state_dict)
 
@@ -49,19 +52,19 @@ for key in range(n_cls):
 
 acc = []
 for run in tqdm(range(args.n_runs)):
-    k = args.k_way ; m = args.n_shot ; n_q = args.n_query
+    k = args.k_way ; n_shot = args.n_shot ; n_q = args.n_query
 
     k_way = random.sample(range(n_cls), k)
 
     data_support = [] ; label_support = [] ; data_query = [] ; label_query = []
     for i, class_id in enumerate(k_way):
-        support_id = random.sample(label_idx[class_id], m)
+        support_id = random.sample(label_idx[class_id], n_shot)
         query_id = random.sample(list(set(label_idx[class_id]) - set(support_id)), n_q)
 
         pc_support_id = data_train[support_id]
         pc_query_id = data_train[query_id]
         data_support.append(pc_support_id)
-        label_support.append(i * np.ones(m))
+        label_support.append(i * np.ones(n_shot))
         data_query.append(pc_query_id)
         label_query.append(i * np.ones(n_q))
 
@@ -73,7 +76,7 @@ for run in tqdm(range(args.n_runs)):
     model = model.eval()
     feats_train = []
     labels_train = []
-    for i in range(k * m):
+    for i in range(k * n_shot):
         data = torch.from_numpy(np.expand_dims(data_support[i], axis = 0))
         label = int(label_support[i])
         data = data.to(device)

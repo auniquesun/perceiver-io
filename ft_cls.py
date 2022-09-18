@@ -87,7 +87,7 @@ def main(rank, logger_name, log_path, log_file):
     model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # ----- load pretrained model
-    assert args.resume, 'Finetuning Perceiver requires pretrained model weights'
+    assert args.resume, 'Finetuning ViPFormer requires pretrained model weights'
     map_location = torch.device('cuda:%d' % rank)
     pretrained = torch.load(args.pc_model_file, map_location=map_location)
     # append `module.` before key

@@ -17,7 +17,7 @@ from datasets.shapenet_part import ShapeNetPart
 from torch.utils.data import DataLoader
 
 from utils import AccuracyMeter, init, Logger, AverageMeter
-from utils import build_ft_partseg, category2part, part2category, shapenetpart_part_weights
+from utils import build_ft_partseg, category2part, part2category
 from parser import args
 
 
@@ -75,12 +75,12 @@ def main(rank, logger_name, log_path, log_file):
     model_ddp = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     # ----- load pretrained model
-    # assert args.resume, 'Finetuning Perceiver_partseg requires pretrained model weights'
-    # map_location = torch.device('cuda:%d' % rank)
-    # pretrained = torch.load(args.pc_model_file, map_location=map_location)
-    # # append `module.` at the beginning of key
-    # pretrained = {"module."+key: value for key, value in pretrained.items()}
-    # model_ddp.load_state_dict(pretrained, strict=False)
+    assert args.resume, 'Finetuning ViPFormer_partseg requires pretrained model weights'
+    map_location = torch.device('cuda:%d' % rank)
+    pretrained = torch.load(args.pc_model_file, map_location=map_location)
+    # append `module.` at the beginning of key
+    pretrained = {"module."+key: value for key, value in pretrained.items()}
+    model_ddp.load_state_dict(pretrained, strict=False)
 
     if args.optim == 'sgd':
         optimizer = optim.SGD(
@@ -125,8 +125,7 @@ def main(rank, logger_name, log_path, log_file):
             optimizer, 
             step_size=args.step_size)
 
-    part_weights = torch.tensor(shapenetpart_part_weights, device=torch.device(f'cuda:{rank}'))
-    criterion = CrossEntropyLoss(weight=part_weights, label_smoothing=0.2)
+    criterion = CrossEntropyLoss(label_smoothing=0.2)
 
     test_best_point_level_acc = .0
     test_best_mean_part_acc = .0
@@ -142,6 +141,7 @@ def main(rank, logger_name, log_path, log_file):
         train_loss = AverageMeter()
         points_seg_acc = AccuracyMeter()
 
+        start_train = datetime.now()
         for batch_idx, (points, obj_label, partseg_label) in enumerate(train_loader):
             # points: [batch, num_points, 3]
             # obj_label: [batch, 1], label of object categories
@@ -175,19 +175,21 @@ def main(rank, logger_name, log_path, log_file):
             torch.nn.utils.clip_grad_norm_(model_ddp.parameters(), 10, norm_type=2)
             optimizer.step()
 
-            if batch_idx % args.print_freq == 0:
-                msg = 'Batch (%d/%d), train_loss: %.6f, point_level_acc: %.6f' % \
-                    (batch_idx, len(train_loader), train_loss.avg.item(), points_seg_acc.num_pos.item()/points_seg_acc.total)
-                logger.write(msg, rank=rank)
-
+            # if batch_idx % args.print_freq == 0:
+            #     msg = 'Batch (%d/%d), train_loss: %.6f, point_level_acc: %.6f' % \
+            #         (batch_idx, len(train_loader), train_loss.avg.item(), points_seg_acc.num_pos.item()/points_seg_acc.total)
+            #     logger.write(msg, rank=rank)
+        train_duration = datetime.now() - start_train
         train_loss, train_acc = train_loss.avg.item(), points_seg_acc.num_pos.item()/points_seg_acc.total
         outstr = 'Train (%d/%d), train_loss: %.6f, point_level_acc: %.6f' % (epoch, args.epochs, train_loss, train_acc)
         logger.write(outstr, rank=rank)
 
         # ------ Test
         with torch.no_grad():
+            test_start = datetime.now()
             test_mean_part_iou, test_mean_category_iou, test_mean_part_acc, test_point_level_acc, test_loss = \
                 test(rank, model_ddp, test_loader, criterion)
+            test_duration = datetime.now() - test_start
             outstr = 'Test (%d/%d), mean_part_iou: %.6f, mean_category_iou: %.6f, mean_part_acc: %.6f, point_level_acc: %.6f, test_loss: %.6f' % \
             (epoch, args.epochs, test_mean_part_iou, test_mean_category_iou, test_mean_part_acc, test_point_level_acc, test_loss)
             logger.write(outstr, rank=rank)
@@ -203,7 +205,7 @@ def main(rank, logger_name, log_path, log_file):
                 if test_mean_category_iou > test_best_mean_category_iou:
                     test_best_mean_category_iou = test_mean_category_iou
                     best_epoch = epoch
-                    logger.write(f'Find new highest Mean Part IoU: {test_best_mean_category_iou} at epoch {best_epoch}!', rank=rank)
+                    logger.write(f'Find new highest Mean Category IoU: {test_best_mean_category_iou} at epoch {best_epoch}!', rank=rank)
                     logger.write('Saving best model ...', rank=rank)
                     save_state = {'epoch': epoch, # start from 0
                         'test_loss': test_loss, 
@@ -228,15 +230,18 @@ def main(rank, logger_name, log_path, log_file):
                 wandb_log["test_mean_part_acc"] = test_mean_part_acc
                 wandb_log["test_best_mean_part_acc"] = test_best_mean_part_acc
                 wandb_log["test_mean_part_iou"] = test_mean_part_iou
-                wandb_log["test_mean_category_iou"]= test_mean_category_iou
                 wandb_log["test_best_mean_part_iou"] = test_best_mean_part_iou
+                wandb_log["test_mean_category_iou"]= test_mean_category_iou
+                wandb_log["test_best_mean_category_iou"]= test_best_mean_category_iou
                 wandb_log["test_loss"] = test_loss
+                wandb_log['test_time_per_epoch'] = test_duration.total_seconds()
+                wandb_log['train_time_per_epoch'] = train_duration.total_seconds()
                 wandb.log(wandb_log)
 
             lr_scheduler.step()
 
     if rank == 0:
-        logger.write(f'Final highest Mean Part IoU: {test_best_mean_part_iou} at epoch {best_epoch}!', rank=rank)
+        logger.write(f'Final highest Mean Category IoU: {test_best_mean_category_iou} at epoch {best_epoch}!', rank=rank)
         logger.write('End of DDP finetuning on %s ...' % args.ft_dataset, rank=rank)
         wandb.finish()
     cleanup()

@@ -141,13 +141,12 @@ def main(rank, logger_name, log_path, log_file):
 
         for i, (points, sem_label) in enumerate(train_loader):
             # points: [batch, num_points, 9]    --> x,y,z,r,g,b + normal vector
-            # sem_label: [batch, 1], label of object categories
             # sem_label: [batch, num_points], label of object parts
             optimizer.zero_grad(set_to_none=True)
             
             batch_size, num_points, _ = points.size()
             # sem_label: it is required to convert to `torch.long` type
-            points, sem_label = points[:, :, :6].to(rank), sem_label.long().to(rank)
+            points, sem_label = points[:, :, :args.point_channels].to(rank), sem_label.long().to(rank)
             # sem_pred: [batch, num_points, num_obj_classes]
             sem_pred = model_ddp(points)
             loss = criterion(sem_pred.reshape(-1, num_obj_classes), sem_label.reshape(-1))
@@ -243,7 +242,7 @@ def test(rank, model, test_loader, criterion):
         batch_size, num_points, _ = points.size()
         # points: [batch, num_points, 9]    --> (x,y,z,r,g,b) + normal vector of size 3
         # sem_label: it is required to convert to `torch.long` type
-        points, sem_label = points[:, :, :6].to(rank), sem_label.long().to(rank)
+        points, sem_label = points[:, :, :args.point_channels].to(rank), sem_label.long().to(rank)
         # sem_pred: [batch_size, num_points, num_obj_classes]
         sem_pred = model(points)
         loss = criterion(sem_pred.reshape(-1, num_obj_classes), sem_label.reshape(-1))
